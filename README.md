@@ -96,3 +96,20 @@ TypeScript · Node.js ≥ 20 · Next.js 15 (App Router, SSE) · React · Electro
 ## 下一步
 
 见 [`docs/ROADMAP.md`](./docs/ROADMAP.md) 与 [`docs/PROGRESS.md`](./docs/PROGRESS.md)：批量重命名、更多 Skill 模板等。
+
+## 演示
+
+1、主页<img width="2560" height="1368" alt="image" src="https://github.com/user-attachments/assets/92cdacfe-395b-4159-960a-a8e1854bce83" />
+
+
+2、开始任务流程<img width="2560" height="1368" alt="image" src="https://github.com/user-attachments/assets/68440b5c-4f8f-4502-b08b-9c8ddbc13699" />
+
+3、运行和对话<img width="2560" height="1368" alt="image" src="https://github.com/user-attachments/assets/f3670910-084d-496b-adf5-cfaec1ec4c77" />
+
+4、自定义agent<img width="2560" height="1368" alt="image" src="https://github.com/user-attachments/assets/823f0ea7-b81a-4bbb-aae1-e6817ffa19da" />
+
+5、自定义skill<img width="2560" height="1368" alt="image" src="https://github.com/user-attachments/assets/6837dd2b-ff82-480f-9834-5f488839326f" />
+
+6、模型设置<img width="2560" height="1368" alt="image" src="https://github.com/user-attachments/assets/75099245-ccd1-4087-b1d8-ebc0a83198de" />
+
+
