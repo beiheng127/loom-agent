@@ -21,6 +21,7 @@ import {
 import { WorkflowView } from "@/components/WorkflowView";
 import { SettingsView } from "@/components/SettingsView";
 import { HomeView, type HomeTab } from "@/components/HomeView";
+import { ModelKeyGuide } from "@/components/ModelKeyGuide";
 import { MarkdownPreview } from "@/components/MarkdownPreview";
 import { useConfirm } from "@/lib/confirm";
 import {
@@ -1926,6 +1927,7 @@ export function LoomShell() {
               planHistory={planHistory}
               readyModels={readyModels}
               modelTotal={meta?.models.length ?? 0}
+              models={meta?.models ?? []}
               onLaunchDemo={(d) => {
                 const full = demos.find((x) => x.id === d.id);
                 if (full) void launchDemo(full);
@@ -3036,9 +3038,7 @@ export function LoomShell() {
 
           {view === "models" ? (
             <div className="view models">
-              <div className="callout">
-                配置 API Key 后可使用云端或本地模型；未配置时可使用内置离线模型。
-              </div>
+              <ModelKeyGuide models={meta?.models ?? []} />
               <div className="cards">
                 {(meta?.models ?? []).map((m) => (
                   <div key={m.id} className="card">
