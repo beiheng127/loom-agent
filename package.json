@@ -1,0 +1,27 @@
+{
+  "name": "loom-agent",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Loom Agent — local-first multi-model coding agent with Plan Board",
+  "type": "module",
+  "engines": {
+    "node": ">=20.18.0"
+  },
+  "workspaces": [
+    "packages/core",
+    "apps/web",
+    "apps/desktop"
+  ],
+  "scripts": {
+    "demo": "npm run demo --workspace=@loom/core",
+    "cli": "npm run cli --workspace=@loom/core --",
+    "build:core": "node ./node_modules/typescript/bin/tsc -p packages/core/tsconfig.json",
+    "build:web": "npm run build --workspace=@loom/web",
+    "build": "npm run build:core && npm run build:web",
+    "dev:web": "npm run dev --workspace=@loom/web",
+    "web": "npm run build:core && npm run dev:web",
+    "desktop": "npm run start --workspace=@loom/desktop",
+    "studio": "node scripts/studio.mjs",
+    "typecheck": "npm run typecheck --workspace=@loom/core"
+  }
+}

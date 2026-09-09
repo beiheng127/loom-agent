@@ -1,0 +1,18 @@
+node_modules/
+dist/
+.env
+.DS_Store
+*.log
+data/workspaces/*/tmp/
+data/workspaces/*/notes/
+data/loom-store/agents.json
+data/loom-store/sessions.json
+data/loom-store/plans.json
+apps/web/.next/
+
+.env.*
+!.env.example
+
+# TS 构建产物
+tsconfig.tsbuildinfo
+*.tsbuildinfo

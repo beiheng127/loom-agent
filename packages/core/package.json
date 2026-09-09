@@ -1,0 +1,33 @@
+{
+  "name": "@loom/core",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "cli": "tsx src/cli.ts",
+    "demo": "tsx src/demo.ts"
+  },
+  "dependencies": {
+    "@ai-sdk/openai": "^3.0.84",
+    "ai": "^6.0.225",
+    "nanoid": "^5.1.16",
+    "yaml": "^2.8.0",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@types/node": "^20.19.43",
+    "tsx": "^4.20.3",
+    "typescript": "^5.8.3"
+  }
+}

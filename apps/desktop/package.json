@@ -1,0 +1,14 @@
+{
+  "name": "@loom/desktop",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Electron shell for Loom Agent Studio",
+  "main": "main.mjs",
+  "scripts": {
+    "start": "electron .",
+    "dev": "electron ."
+  },
+  "dependencies": {
+    "electron": "^35.2.1"
+  }
+}

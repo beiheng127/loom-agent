@@ -1,0 +1,23 @@
+{
+  "agents": [
+    {
+      "id": "custom-docs-patcher-2snf",
+      "name": "文档对照改码",
+      "systemPrompt": "你先查公开文档与本地 README，再提出最小补丁。写入必须 write_file 并等待批准。",
+      "allowedTools": [
+        "list_dir",
+        "read_file",
+        "grep_files",
+        "fetch_url",
+        "web_search",
+        "write_file"
+      ],
+      "defaultModelId": "mock-editor",
+      "skillIds": [
+        "docs-then-patch",
+        "demo-readme"
+      ]
+    }
+  ],
+  "updatedAt": 1788952499596
+}

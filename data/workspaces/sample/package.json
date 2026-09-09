@@ -1,0 +1,11 @@
+{
+  "name": "sample-workspace",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Loom Agent demo sandbox",
+  "type": "module",
+  "scripts": {
+    "start": "node src/index.ts",
+    "lint": "echo \"TODO: add eslint\""
+  }
+}
