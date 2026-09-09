@@ -2,6 +2,7 @@
 
 import { useMemo, useState } from "react";
 import { HomeLanding } from "@/components/HomeLanding";
+import type { GuideModelRow } from "@/components/ModelKeyGuide";
 import { FEATURE_GUIDE } from "@/lib/feature-guide";
 import { useConfirm } from "@/lib/confirm";
 
@@ -58,6 +59,7 @@ export function HomeView({
   onClearProgress,
   readyModels,
   modelTotal,
+  models,
 }: {
   tab: HomeTab;
   onTabChange: (t: HomeTab) => void;
@@ -68,6 +70,7 @@ export function HomeView({
   planHistory: PlanRow[];
   readyModels: number;
   modelTotal: number;
+  models: GuideModelRow[];
   onLaunchDemo: (d: DemoCard) => void;
   onOpenNav: (id: string) => void;
   onNewSession: () => void;
@@ -147,6 +150,7 @@ export function HomeView({
             demoTotal={demos.length}
             readyModels={readyModels}
             modelTotal={modelTotal}
+            models={models}
             onOpenNav={onOpenNav}
             onTabChange={onTabChange}
           />
