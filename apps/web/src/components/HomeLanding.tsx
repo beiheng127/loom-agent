@@ -1,6 +1,7 @@
 "use client";
 
 import type { HomeTab } from "@/components/HomeView";
+import { ModelKeyGuide, type GuideModelRow } from "@/components/ModelKeyGuide";
 
 const FEATURES = [
   {
@@ -40,6 +41,7 @@ export function HomeLanding({
   demoTotal,
   readyModels,
   modelTotal,
+  models,
   onOpenNav,
   onTabChange,
 }: {
@@ -49,6 +51,7 @@ export function HomeLanding({
   demoTotal: number;
   readyModels: number;
   modelTotal: number;
+  models: GuideModelRow[];
   onOpenNav: (id: string) => void;
   onTabChange: (t: HomeTab) => void;
 }) {
@@ -122,6 +125,10 @@ export function HomeLanding({
           <span className="landing-stat-l">就绪模型</span>
         </div>
       </section>
+
+      {readyModels < modelTotal ? (
+        <ModelKeyGuide models={models} compact />
+      ) : null}
 
       <div className="landing-progress-wrap">
         <div className="landing-progress-hd">
