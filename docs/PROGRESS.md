@@ -165,7 +165,7 @@ HTTP 探针 12 → **17** 项断言，全绿；`typecheck` / `next build`（20 �
 | 同批并发上限 | `mapWithConcurrency(items, limit, fn)`：`limit <= 0` 退化成 `Promise.all`，否则跑完一个补一个 | 单测：limit=2 时峰值 `inFlight=2`、结果顺序与输入一致；limit=0 → 峰值 3 |
 | best-of-N 择优 | step 的 `bestOf > 1` → 并行跑 N 个候选（受同一并发闸门约束），再由 `judge` 返回下标挑一份 | 单测：3 个候选都跑了、选中的是最长的那份、`candidates` 全留着给 UI；裁判越界 → 退回第 0 个并在 `error` 写明；裁判抛错 → 不扔结果，标「择优失败」 |
 | **没裁判不算择优** | 只有真给了 judge 才写 `selectedCandidate` | 这条是修自己的假动作：原来没接裁判也会写，会把「跑了 3 个候选」读成「择优成功」 |
-| 失败重规划（Replanner） | `replan` 回调：某步重试也失败 → 让它重排**剩下没跑的步**，就地改写 workers 数组（下标一一对应），换完图重算剩余层级接着调度 | 单测：链 A→B→C 炸在 A，重排后 B 变成新目标且跑成功；回调抛错 / 返回 null → 剩下步照旧 skipped，绝不把编排带崩 |
+| 失败重规划（Replanner） | `replan` 回调：某步重试也失败 → 让它重排**剩下没跑的步**，就地改写 workers 数组（下标一一对应），换完图重算剩余层级接着调度；`maxReplans` 是**全局预算**（默认 1，整个 plan 最多重排一次） | 单测：链 A→B→C 炸在 A，重排后 B 变成新目标且跑成功；回调抛错 / 返回 null / 数量对不上 → 剩下步照旧 skipped，绝不把编排带崩 |
 | 真模型工厂 | `makePlannerJudge({modelId})` / `makePlannerReplanner({modelId})`：judge 温度 0、只输出 `{"index":n}`；replanner 输出与 `/api/plan?planner` 同一份 `normalizePlannerDrafts` 校验 | `scripts/probes/replan-live.mjs` |
 
 **踩到并修掉的一个真 bug**（真模型端到端才暴露出来的）：重规划出来的新步会**沿用失败那一步的模型**。
@@ -179,7 +179,8 @@ HTTP 探针 12 → **17** 项断言，全绿；`typecheck` / `next build`（20 �
 | W2 | `failed` · 同一个错（继承了 `openai-mini`） | `done` · `deepseek-chat`，真读 README 写出总结 |
 
 **数字**：单测 128 → **158**（新增 `plan-orchestrate.test.mjs` 里 26 条 + `plan-planner.test.mjs` 里 4 条）；
-HTTP 探针 33 → **35** 项断言全绿；`typecheck`（core + web）EXIT=0。
+HTTP 探针 33 → **35** 项断言全绿；`typecheck`（core + web）EXIT=0；`next build` EXIT=0（20 路由）；
+本轮改动已提交 `7e8e335`（13 files, +1584）。
 
 ---
 
