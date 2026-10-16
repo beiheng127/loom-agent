@@ -8,6 +8,10 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { loadRootEnv } from "./load-env.mjs";
+
+// 先把仓库根 .env 注入本进程，后续 next/tsc 子进程通过 env 继承
+const rootEnv = loadRootEnv();
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, "..");
@@ -147,6 +151,16 @@ async function main() {
   }
   const major = Number(ver.replace(/^v/, "").split(".")[0]);
   log(`使用 ${label}: ${ver}`);
+
+  if (rootEnv.file) {
+    const withValues = rootEnv.loaded.filter((k) =>
+      (process.env[k] ?? "").trim(),
+    );
+    log(
+      `已加载根 .env：${path.relative(ROOT, rootEnv.file)}` +
+      (withValues.length ? `（${withValues.join(", ")}）` : "（无有效变量）"),
+    );
+  }
 
   if (major < 20) {
     fail(

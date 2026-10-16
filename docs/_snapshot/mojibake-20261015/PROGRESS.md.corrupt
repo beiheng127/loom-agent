@@ -1,0 +1,72 @@
+﻿# Loom Agent 路 杩涘害涓庝换鍔℃竻鍗?
+> 鏇存柊锛?026-10-15
+> 鍏宠仈锛歔`HARNESS-UPGRADE.md`](./HARNESS-UPGRADE.md)锛圥0锛壜?[`HARNESS-P1.md`](./HARNESS-P1.md)锛圥1 路 **鏈**锛壜?[`ROADMAP.md`](./ROADMAP.md) 路 [`CAPABILITY-MAP.md`](./CAPABILITY-MAP.md)
+
+---
+
+## 褰撳墠鐘舵€侊紙涓€鍙ヨ瘽锛?
+**鏈夌湡 harness 鐨勬湰鍦?Coding Agent Studio**锛氬師鐢?tool calling + 閫愭 token 璁￠噺 + 闃堝€间笂涓嬫枃鍘嬬缉 + 瀛?Agent 濮旀淳 + 鎻掍欢鐑姞杞斤紱Composer Diff HITL銆丳lan 骞惰銆丼kills/Agents 鐓ф棫锛?*55 鏉″崟娴嬪叏缁?*锛屾棤 Key 鍙窇绂荤嚎 Demo銆?
+---
+
+## P1 鏈疆澧為噺锛?026-10-15锛?
+寮曟搸渚т粠銆屾湁涓惊鐜€嶈ˉ鍒般€屾湁 harness銆嶃€傜粏鑺傝 [`HARNESS-P1.md`](./HARNESS-P1.md)銆?
+| 灞?| 鍐呭 | 鏂囦欢 | 鐘舵€?|
+|---|---|---|---|
+| 3 | 涓婁笅鏂囧帇缂╋紙0.8 / 0.16 / 65536 闃堝€硷級 | `src/loop/compact.ts` | 鉁?|
+| 4 | 瀛?Agent 濮旀淳 + 鎺у埗宸ュ叿 | `src/agents/subagents.ts` | 鉁?|
+| 5 | `todo_write` 鏁磋〃鏇挎崲 + 浼氳瘽鎶曞奖 | `src/plan/todo.ts` | 鉁?|
+| 6 | 鎻掍欢绯荤粺锛堟竻鍗?+ 澶辫触闅旂锛?| `src/plugins/` + `plugins/` | 鉁?|
+| 鈥?| 鐧藉悕鍗曡ˉ `>` `<`锛堣秺鐣屽啓娲烇級 | `src/tools/cmd.ts` | 鉁?|
+| 鈥?| 涓や釜杩愯璺敱 + `meta` 鎺ョ嚎 | `apps/web/src/app/api/` | 鉁?|
+| 鈥?| UI 娓叉煋濮旀淳/鍘嬬缉/token 浜嬩欢 | `apps/web/src/components/LoomShell.tsx` | 鉁?|
+| 7 | 鍗曟祴 0 鈫?55 | `packages/core/test/` | 鉁?|
+
+**鍏抽敭淇**锛歚sessionId` 涔嬪墠浠庢湭闅忚姹傚彂鍑猴紝瀵艰嚧 todo 鑳藉姏鍦?UI 閲屾案杩滆蛋涓嶅埌锛?`subagent_start` / `subagent_end` / `compacted` / `usage` 鍥涗釜浜嬩欢涔嬪墠钀借繘 SSE
+if/else 閾句細琚?*闈欓粯涓㈠純**鈥斺€斾袱鑰呴兘宸叉帴涓娿€?
+琛ヨ锛堝悓鏃ワ級锛氬眰5 姝ゅ墠**娌℃湁绂荤嚎婕旂ず鍏ュ彛**鈥斺€擿todo_focus` 鍙 TODO.md 涓嶈皟 `todo_write`锛?鑰?`resolveMockScenario` 鐨?`/TODO/i` 鍒嗘敮鎺掑湪 `todo_focus` 涔嬪墠锛屾妸銆岀湅鐪?TODO.md 閲岀殑寰呭姙娓呭崟銆?涔熸埅璧板垽鎴?`grep_audit`銆傜幇鍦?`todo_focus` 鐪熻皟涓€娆℃暣琛ㄦ浛鎹紝鏄惧紡寰呭姙鎺緸浼樺厛鍖归厤锛?鍗曟祴 25/26 閿佷綇杩欎袱鏉★紱HTTP 闈㈠疄娴?`tool_call todo_write` 鈫?`Updated todo list: 1 pending, 1 in progress, 1 completed.`
+
+---
+
+## 瀹屾垚搴︽€昏
+
+| 妯″潡 | 瀹屾垚搴?| 璇存槑 |
+|------|--------|------|
+| Agent Harness锛堝崗璁?璁￠噺/鍘嬬缉/濮旀淳/鎻掍欢锛?| 鉁?~60% | 浜斾欢鍐呰剰榻愪簡锛泃odo 鏈惤鐩樸€佹棤 retry |
+| Home / 涓婃墜 | 鉁?~95% | 姒傝钀藉湴椤点€丏emo銆佸姛鑳借鏄庛€佸巻鍙?CRUD |
+| 澶氭浠诲姟 | 鉁?~90% | 鍥涙娴佹按绾裤€佸洖鍐欍€佺‘璁?|
+| Composer Run | 鉁?~90% | Ask/Agent銆丼essions銆丂鏂囦欢銆丼SE銆乼oken 鐢ㄩ噺 |
+| Diff / 鍛戒护 HITL | 鉁?~95% | 缁熻銆佸崟娆?鍏ㄩ儴鎾ゅ洖 |
+| Plan Board | 鉁?~80% | 澶氶璁俱€佸巻鍙诧紱**鏃?retry銆佹棤鎷╀紭**锛堟槸鎵囧嚭涓嶆槸缂栨帓锛?|
+| Agents / Skills | 鉁?~92% | 鍚娲捐兘鍔涘０鏄庯紙`orchestrator`锛?|
+| Models / 鑱旂綉 | 鉁?~92% | 姣忎釜妯″瀷甯?`contextWindow`锛沗web_search` live锛堥渶 Key锛?|
+| Desktop | 鉁?~85% | 妫€娴?:3010锛屽惁鍒欒嚜鍔?`studio` |
+| **宸ョ▼闂ㄧ** | 鉂?~10% | 鏈?55 鏉″崟娴嬶紱**鏃?git / CI / lint / LICENSE** |
+
+---
+
+## 鍚庣画鍔熻兘锛堟寜鎬т环姣旀帓锛?
+| # | 椤?| 鐘舵€?| 澶囨敞 |
+|---|----|------|------|
+| 1 | `git init` + LICENSE + 鎺ㄨ繙绔?| 寰呭仛 | 闆朵唬鐮侊紝鏀剁泭鏈€澶э紱杩滅鍋滃湪 2026-09-09 |
+| 2 | GitHub Actions锛歵ypecheck + test | 寰呭仛 | 绾?30 琛?YAML |
+| 3 | todo 鐘舵€佽惤鐩?| 寰呭仛 | 瀵归綈 DSH銆屾棩蹇楁壙杞界姸鎬併€嶏紝鐜颁负鍐呭瓨 Map |
+| 4 | Plan Worker 澶辫触閲嶈瘯 + 鐪熺紪鎺?| 寰呭仛 | 鐜板湪鍙槸 `Promise.all` 鎵囧嚭 |
+| 5 | `zod` 鐢ㄨ捣鏉ユ垨鍒犳帀 | 寰呭仛 | 鍒椾簡渚濊禆闆?import |
+| 6 | 鎵归噺閲嶅懡鍚嶉瑙?+ 鎵瑰噯 | 寰呭仛 | Sprint B 鍓╀綑 |
+
+---
+
+## 楠屾敹
+
+```bash
+cd agent
+npm run typecheck     # EXIT=0锛坈ore + web锛?npm test              # 55 pass / 0 fail
+node packages/core/dist/demo.js      # 绂荤嚎 Demo锛屾棤闇€ Key
+node scripts/probes/harness.mjs           # 鎻掍欢 + 濮旀淳 + 璁￠噺绔埌绔紙搴撶骇锛?npm run studio                       # :3010
+node scripts/probes/http.mjs              # HTTP 绔埌绔紝12 椤规柇瑷€锛堝彟寮€缁堢锛?cd apps/web && npx next build        # EXIT=0锛?0 鏉¤矾鐢?```
+
+UI 鑷祴鍥涚偣锛?
+1. Composer 鏍囬鏍忓嚭鐜?`绗?N 姝?鈫憍 鈫搚`銆?2. 閫?`orchestrator` 闂€屾淳瀛?agent 骞惰鐩樼偣銆嶏紝搴斿嚭鐜板瓙 agent 鍗＄墖
+   锛堜簨浠跺悕 `subagent_start` / `subagent_end`锛夈€?3. 澶氳疆鍫嗗埌闃堝€硷紝灞曞紑搴曢儴銆孒arness 浜嬩欢杞ㄨ抗銆嶅簲鐪嬪埌鍘嬬缉涓€琛屻€?   **娉ㄦ剰涓や釜鍚嶅瓧**锛氫簨浠跺悕鏄?`compacted`锛孶I 鍗＄墖鍚嶅彨 `context_compact`
+   锛坄LoomShell.tsx:1035` 鏀朵簨浠讹紝`:1042` 寤哄崱鐗囷級銆?4. 閫?`guide` 闂€屽府鎴戝垪涓€涓嬪緟鍔炴竻鍗曘€嶏紝搴斿嚭鐜?`todo_write` 鐨?call/ok 鍗＄墖锛?   缁撴灉鏂囨 `Updated todo list: 1 pending, 1 in progress, 1 completed.`
+   鈥斺€旇繖鏄眰5 鍞竴鐨勭绾垮彲瑙佸叆鍙ｃ€?

@@ -145,6 +145,10 @@ type PlanStep = {
   modelId: string;
   resultPreview?: string;
   error?: string;
+  /** 依赖的步骤 id（编排器把 Worker 下标解析成了 id） */
+  dependsOnIds?: string[];
+  /** 实际跑了几次（含重试） */
+  attempts?: number;
 };
 
 type LogLine = { t: number; text: string };
@@ -153,6 +157,8 @@ type WorkerDraft = {
   agentId: string;
   modelId: string;
   goal: string;
+  /** 依赖的同批 Worker 下标（0 起），留空 = 无依赖，可与其他无依赖项并行 */
+  dependsOn?: number[];
 };
 type Progress = Record<string, boolean>;
 type SkillDetail = SkillBrief & {
@@ -181,6 +187,7 @@ const TOOL_OPTIONS = [
   "run_safe_cmd",
 ];
 const PROGRESS_KEY = "loom.demo.progress.v1";
+const CONFIG_PANEL_KEY = "loom.ui.configPanelOpen.v1";
 
 function loadProgress(): Progress {
   try {
@@ -219,6 +226,8 @@ export function LoomShell() {
   const [answer, setAnswer] = useState("");
   const [logs, setLogs] = useState<LogLine[]>([]);
   const [steps, setSteps] = useState<PlanStep[]>([]);
+  // 调度器算出来的批：同批内部并行，批间串行（下标指向 steps）
+  const [planBatches, setPlanBatches] = useState<number[][]>([]);
   const [merged, setMerged] = useState("");
   const [pendingWrites, setPendingWrites] = useState<
     Array<{
@@ -237,10 +246,25 @@ export function LoomShell() {
       content: string;
     }>
   >([]);
-  const [pendingCmds, setPendingCmds] = useState<Array<{ command: string }>>(
-    [],
-  );
+  const [pendingCmds, setPendingCmds] = useState<
+    Array<{ command: string; background?: boolean }>
+  >([]);
+  /** 后台 job（/api/jobs 拉取）：批准 background 命令后在这里看进度、点停 */
+  const [jobs, setJobs] = useState<
+    Array<{
+      id: string;
+      command: string;
+      status: string;
+      elapsedMs: number;
+      exitCode?: number | null;
+      tail: string;
+    }>
+  >([]);
   const runTokenRef = useRef(0);
+  /** 会话流条目唯一序号：同名 phase（如两次 thinking）在同一毫秒内也不会撞 key */
+  const threadSeqRef = useRef(0);
+  const nextThreadId = (prefix: string) =>
+    `${prefix}-${++threadSeqRef.current}`;
   const workflowRunRef = useRef<{
     ticketId: string;
     stageId: StageId;
@@ -259,10 +283,22 @@ export function LoomShell() {
   >([]);
   const [selectedFile, setSelectedFile] = useState<string | undefined>();
   const [phaseLabel, setPhaseLabel] = useState<string>("idle");
+  // 层2 计量的可视化：每次 usage 事件更新，run 开始时清零
+  const [tokenUsage, setTokenUsage] = useState<{
+    step: number;
+    input: number;
+    output: number;
+  } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [planPreset, setPlanPreset] = useState<
-    "homo" | "hetero" | "triple" | "custom"
+    "homo" | "hetero" | "triple" | "chain" | "custom"
   >("hetero");
+  // 每个 Worker 失败后的额外重试次数；只在 /api/plan 这条路上生效
+  const [planRetries, setPlanRetries] = useState(1);
+  // 让模型先把总目标拆成 Worker 清单（一次调用）；没拆成 / 没真模型就回落预设
+  const [planPlanner, setPlanPlanner] = useState(false);
+  const [planPlannerModel, setPlanPlannerModel] = useState("");
+  const [planPlannerNote, setPlanPlannerNote] = useState("");
   const [workers, setWorkers] = useState<WorkerDraft[]>([
     {
       title: "Worker A",
@@ -305,6 +341,18 @@ export function LoomShell() {
   const [preview, setPreview] = useState<{ path: string; content: string } | null>(
     null,
   );
+  /** 中栏副 tab：AI 对话 / 文件内容 */
+  const [mainTab, setMainTab] = useState<"chat" | "file">("chat");
+  /** 右侧配置面板展开/收起，偏好持久化到 localStorage。
+   *  注意：首帧恒为 true（与 SSR 一致），挂载后再读偏好，避免 hydration mismatch */
+  const [configOpen, setConfigOpen] = useState(true);
+  useEffect(() => {
+    try {
+      if (localStorage.getItem(CONFIG_PANEL_KEY) === "0") setConfigOpen(false);
+    } catch {
+      /* ignore */
+    }
+  }, []);
   const [mentionOpen, setMentionOpen] = useState(false);
   const [mentionQ, setMentionQ] = useState("");
   const [treeFiles, setTreeFiles] = useState<string[]>([]);
@@ -317,10 +365,6 @@ export function LoomShell() {
   const metaRef = useRef(meta);
   metaRef.current = meta;
 
-  const selectedModel = useMemo(
-    () => meta?.models.find((m) => m.id === modelId),
-    [meta, modelId],
-  );
   const readyModels = useMemo(
     () => (meta?.models ?? []).filter((m) => m.availability.ready).length,
     [meta],
@@ -536,21 +580,6 @@ export function LoomShell() {
     setError("在浏览器中请粘贴工作区绝对路径；桌面端可使用打开文件夹。");
   };
 
-  const ingestEvents = (events: Array<Record<string, unknown>>) => {
-    for (const e of events) {
-      if (e.type === "tool_call") {
-        pushLog(`→ ${String(e.name)} ${JSON.stringify(e.args)}`);
-      } else if (e.type === "tool_result") {
-        const r = e.result as { ok?: boolean } | undefined;
-        pushLog(`← ${String(e.name)} ok=${r?.ok}`);
-      } else if (e.type === "approval_needed") {
-        pushLog(`! 待批准 ${String(e.path)}`);
-      } else if (e.type === "text") {
-        pushLog(String(e.text).slice(0, 160));
-      }
-    }
-  };
-
   const stop = () => {
     runTokenRef.current = Date.now();
     abortCtrl?.abort();
@@ -574,9 +603,20 @@ export function LoomShell() {
         next.push({ path: rel, content: data.content });
         return next.slice(-4);
       });
+      // 文件内容在中栏展示（与 AI 对话通过副 tab 切换）
+      setMainTab("file");
       pushLog(`@${rel} 已附加到上下文`);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
+    }
+  };
+
+  const toggleConfigPanel = (open: boolean) => {
+    setConfigOpen(open);
+    try {
+      localStorage.setItem(CONFIG_PANEL_KEY, open ? "1" : "0");
+    } catch {
+      /* ignore */
     }
   };
 
@@ -614,6 +654,11 @@ export function LoomShell() {
     abortCtrl?.abort();
     setSessionId(s.id);
     setThread(s.thread);
+    // 恢复旧会话后把计数器抬到其最大序号之后，避免新消息 id 与历史条目撞 key
+    threadSeqRef.current = s.thread.reduce((max, t) => {
+      const n = Number(/^[a-z-]+-(\d+)$/.exec(t.id)?.[1] ?? 0);
+      return Number.isFinite(n) ? Math.max(max, n) : max;
+    }, threadSeqRef.current);
     setStudioMode(s.mode);
     const writes = s.thread
       .filter(
@@ -797,6 +842,11 @@ export function LoomShell() {
     const readOnly = effectiveMode === "ask";
     if (readOnly && a === "editor") a = "reader";
 
+    // 层5：todo 列表归属于一次 agent 会话。首个 run 时补一个稳定 id，
+    // 否则服务端拿不到 sessionId，todo_write 这条能力在 UI 里永远走不到。
+    const runSessionId = sessionId ?? `s-${Date.now()}`;
+    if (!sessionId) setSessionId(runSessionId);
+
     workflowRunRef.current = pendingWorkflow;
     setWorkflowBanner(pendingWorkflow);
 
@@ -812,6 +862,7 @@ export function LoomShell() {
     setPendingCmds([]);
     rejectedCmdsRef.current = new Set();
     setPhaseLabel("thinking");
+    setTokenUsage(null);
     if (opts?.goal) setGoal(opts.goal);
     if (opts?.agentId) setAgentId(a);
     if (opts?.modelId) setModelId(opts.modelId);
@@ -827,7 +878,7 @@ export function LoomShell() {
 
     pushThread({
       kind: "user",
-      id: `u-${Date.now()}`,
+      id: nextThreadId("u"),
       text:
         g +
         (contextFiles.length
@@ -858,6 +909,9 @@ export function LoomShell() {
           readOnly,
           history,
           contextFiles,
+          // harness：会话归属（todo 投影）与插件工具加载
+          sessionId: runSessionId,
+          plugins: true,
         }),
       });
 
@@ -865,7 +919,7 @@ export function LoomShell() {
         const err = await res.json().catch(() => ({}));
         throw new Error(
           [err.error, err.hint].filter(Boolean).join(" · ") ||
-            `HTTP ${res.status}`,
+          `HTTP ${res.status}`,
         );
       }
 
@@ -875,7 +929,7 @@ export function LoomShell() {
       let buffer = "";
       let assistantBuf = "";
       let turnBuf = "";
-      let streamId = `a-${Date.now()}`;
+      let streamId = nextThreadId("a");
 
       const syncStreaming = (text: string, streaming: boolean) => {
         if (runTokenRef.current !== runToken) return;
@@ -922,7 +976,7 @@ export function LoomShell() {
             setPhaseLabel(phase);
             pushThread({
               kind: "phase",
-              id: `ph-${Date.now()}-${phase}`,
+              id: nextThreadId("ph"),
               phase,
               at: Date.now(),
             });
@@ -941,11 +995,11 @@ export function LoomShell() {
             if (turnBuf) {
               syncStreaming(turnBuf, false);
               turnBuf = "";
-              streamId = `a-${Date.now()}`;
+              streamId = nextThreadId("a");
             }
             pushThread({
               kind: "tool",
-              id: `tc-${Date.now()}-${String(payload.name)}`,
+              id: nextThreadId("tc"),
               name: String(payload.name),
               args: payload.args as Record<string, unknown>,
               at: Date.now(),
@@ -963,7 +1017,7 @@ export function LoomShell() {
               name === "web_search";
             pushThread({
               kind: "tool",
-              id: `tr-${Date.now()}-${name}`,
+              id: nextThreadId("tr"),
               name,
               ok: result?.ok,
               statusHint: notConfigured
@@ -978,32 +1032,83 @@ export function LoomShell() {
               ).slice(0, 280),
               at: Date.now(),
             });
+          } else if (event === "subagent_start") {
+            // 委派是工具调用的一种，复用 tool 卡渲染，不发新的 ThreadItem 类型
+            const toolName = String(payload.toolName ?? "subagent");
+            pushLog(`↳ 派出 ${toolName}`);
+            pushThread({
+              kind: "tool",
+              id: nextThreadId("sa"),
+              name: toolName,
+              statusHint: "call",
+              preview: `已派出子 agent（深度 ${String(payload.depth ?? 1)}）· ${String(payload.label ?? "")}`,
+              at: Date.now(),
+            });
+          } else if (event === "subagent_end") {
+            const status = String(payload.status ?? "inactive");
+            const text = String(payload.text ?? payload.error ?? "");
+            pushLog(`↳ ${String(payload.toolName)} ${status}`);
+            pushThread({
+              kind: "tool",
+              id: nextThreadId("se"),
+              name: String(payload.toolName ?? "subagent"),
+              ok: status !== "failed",
+              statusHint: status === "failed" ? "error" : "ok",
+              preview: `子 agent ${status} · ${String(payload.steps ?? 0)} 步\n${text.slice(0, 260)}`,
+              at: Date.now(),
+            });
+          } else if (event === "compacted") {
+            pushLog(
+              `⇣ 压缩 ${String(payload.compactedCount)} 条 · 释放 ${String(payload.releasedTokens)} tokens`,
+            );
+            pushThread({
+              kind: "tool",
+              id: nextThreadId("cx"),
+              name: "context_compact",
+              ok: true,
+              statusHint: "ok",
+              preview: `压缩了 ${String(payload.compactedCount)} 条历史，估算释放 ${String(payload.releasedTokens)} tokens（压力 ${String(payload.pressureTokens)} / 阈值 ${String(payload.thresholdTokens)}，逐字保留 ${String(payload.retainedCount)} 条）`,
+              at: Date.now(),
+            });
+          } else if (event === "usage") {
+            const usage = payload.usage as
+              | { step?: number; inputTokens?: number; outputTokens?: number }
+              | undefined;
+            if (usage) {
+              setTokenUsage({
+                step: Number(usage.step ?? 0),
+                input: Number(usage.inputTokens ?? 0),
+                output: Number(usage.outputTokens ?? 0),
+              });
+            }
           } else if (event === "approval_needed") {
             const kind =
               (payload.kind as "write" | "cmd" | undefined) ??
               (payload.command ? "cmd" : "write");
             if (kind === "cmd") {
               const command = String(payload.command ?? payload.path ?? "");
-              pushLog(`! 待批准命令 ${command}`);
+              const background = payload.background === true;
+              pushLog(`! 待批准命令 ${command}${background ? "（后台）" : ""}`);
               setPendingCmds((prev) =>
                 prev.some((x) => x.command === command)
                   ? prev
-                  : [...prev, { command }],
+                  : [...prev, { command, background }],
               );
               upsertHitl({
                 kind: "hitl",
-                id: `h-cmd-${Date.now()}-${command}`,
+                id: nextThreadId("h-cmd"),
                 hitlKind: "cmd",
                 path: command,
                 content: "",
                 command,
+                background,
                 at: Date.now(),
               });
             } else {
               pushLog(`! 待批准 ${String(payload.path)}`);
               upsertHitl({
                 kind: "hitl",
-                id: `h-${Date.now()}-${String(payload.path)}`,
+                id: nextThreadId("h"),
                 hitlKind: "write",
                 path: String(payload.path),
                 content: String(payload.content ?? ""),
@@ -1033,7 +1138,7 @@ export function LoomShell() {
             for (const w of writes) {
               upsertHitl({
                 kind: "hitl",
-                id: `hr-${Date.now()}-${w.path}`,
+                id: nextThreadId("hr"),
                 hitlKind: "write",
                 path: w.path,
                 content: w.content,
@@ -1126,6 +1231,8 @@ export function LoomShell() {
     setBusy(true);
     setError(null);
     setSteps([]);
+    setPlanBatches([]);
+    setPlanPlannerNote("");
     setMerged("");
     setPendingWrites([]);
     if (opts?.goal) setGoal(opts.goal);
@@ -1142,21 +1249,33 @@ export function LoomShell() {
           workspace,
           preset,
           preferReal: opts?.preferReal,
+          maxRetries: planRetries,
+          planner: planPlanner || undefined,
+          plannerModelId: planPlanner ? planPlannerModel || undefined : undefined,
           workers:
             preset === "custom"
               ? workers.map((w) => ({
-                  title: w.title,
-                  agentId: w.agentId,
-                  modelId: w.modelId,
-                  goal: w.goal || g,
-                }))
+                title: w.title,
+                agentId: w.agentId,
+                modelId: w.modelId,
+                goal: w.goal || g,
+                dependsOn: w.dependsOn?.length ? w.dependsOn : undefined,
+              }))
               : undefined,
         }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
       setSteps(data.steps ?? []);
+      setPlanBatches(
+        Array.isArray(data.batches) ? (data.batches as number[][]) : [],
+      );
       setMerged(data.merged ?? "");
+      const plannerInfo = data.planner as
+        | { ok: boolean; summary: string }
+        | undefined;
+      setPlanPlannerNote(plannerInfo?.summary ?? "");
+      if (plannerInfo?.summary) pushLog(`plan 规划 · ${plannerInfo.summary}`);
       const writes = (data.pendingWrites ?? []) as Array<{
         path: string;
         content: string;
@@ -1317,24 +1436,65 @@ export function LoomShell() {
     removeHitl({ hitlKind: "write", path: w.path });
   };
 
-  const approveCmd = async (c: { command: string }) => {
+  /** 拉后台 job 列表：批准后台命令后、面板刷新、以及有 job 在跑时轮询 */
+  const refreshJobs = async () => {
+    try {
+      const res = await fetch("/api/jobs");
+      if (!res.ok) return;
+      const data = (await res.json()) as { jobs?: typeof jobs };
+      setJobs(Array.isArray(data.jobs) ? data.jobs : []);
+    } catch {
+      // job 面板是辅助视图，拉不到就不显示，不打断主流程
+    }
+  };
+
+  const killJob = async (jobId: string) => {
+    const res = await fetch("/api/jobs", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ jobId }),
+    });
+    const data = (await res.json().catch(() => ({}))) as { killed?: boolean };
+    pushLog(data.killed ? `job killed · ${jobId}` : `job 未杀（可能已结束） · ${jobId}`);
+    void refreshJobs();
+  };
+
+  // 挂载时拉一次；有 job 在跑就 1.5s 轮询，全结束就停（不拖着界面空转）
+  useEffect(() => {
+    void refreshJobs();
+  }, []);
+  useEffect(() => {
+    if (!jobs.some((j) => j.status === "running")) return;
+    const timer = setInterval(() => {
+      void refreshJobs();
+    }, 1500);
+    return () => clearInterval(timer);
+  }, [jobs]);
+
+  const approveCmd = async (c: { command: string; background?: boolean }) => {
     const res = await fetch("/api/cmds/approve", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ workspace, command: c.command }),
+      body: JSON.stringify({
+        workspace,
+        command: c.command,
+        background: c.background === true,
+      }),
     });
     const data = (await res.json()) as {
       ok?: boolean;
       stdout?: string;
       stderr?: string;
       error?: string;
+      jobId?: string;
+      background?: boolean;
       exitCode?: number | null;
     };
     if (!res.ok) {
       setError(data.error || "命令执行失败");
       pushThread({
         kind: "tool",
-        id: `cmd-err-${Date.now()}`,
+        id: nextThreadId("cmd-err"),
         name: "run_safe_cmd",
         ok: false,
         statusHint: "error",
@@ -1345,10 +1505,24 @@ export function LoomShell() {
     }
     removeHitl({ hitlKind: "cmd", command: c.command });
     setPendingCmds((prev) => prev.filter((x) => x.command !== c.command));
+    if (data.background && data.jobId) {
+      pushLog(`cmd 后台启动 · ${data.jobId} · ${c.command}`);
+      void refreshJobs();
+      pushThread({
+        kind: "tool",
+        id: nextThreadId("cmd-job"),
+        name: "run_safe_cmd",
+        ok: data.ok !== false,
+        statusHint: data.ok === false ? "error" : "ok",
+        preview: `后台 job ${data.jobId} 已启动（右侧 Jobs 面板看进度，模型可用 job_output 读）`,
+        at: Date.now(),
+      });
+      return;
+    }
     pushLog(`cmd ok · ${c.command}`);
     pushThread({
       kind: "tool",
-      id: `cmd-ok-${Date.now()}`,
+      id: nextThreadId("cmd-ok"),
       name: "run_safe_cmd",
       ok: data.ok !== false,
       statusHint: data.ok === false ? "error" : "ok",
@@ -1772,7 +1946,9 @@ export function LoomShell() {
         run: () => setThread([]),
       },
     ],
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // 依赖数组刻意只留 [demos]：其余闭包捕获的都是 setState / 常量（引用稳定），
+    // 每轮都重建命令面板没有意义。这里不再挂 eslint-disable 指令 ——
+    // 仓库没有注册 react-hooks 插件，那行注释自身会报 “rule not found”。
     [demos],
   );
 
@@ -1980,7 +2156,9 @@ export function LoomShell() {
           ) : null}
 
           {view === "run" ? (
-            <div className="view run composer">
+            <div
+              className={`view run composer${configOpen ? "" : " config-collapsed"}`}
+            >
               <aside className="col explorer">
                 <div className="col-hd">
                   <span>Explorer</span>
@@ -2056,18 +2234,12 @@ export function LoomShell() {
                       {rulesPath ? ` · rules:${rulesPath}` : ""}
                     </div>
                   ) : null}
-                  <p className="hint">点击文件 = 预览 + @context（最多 4）</p>
+                  <p className="hint">点击文件 = 中栏预览 + @context（最多 4）</p>
                   <FileTree
                     workspace={workspace}
                     selected={selectedFile}
                     onPickFile={(p) => void attachFile(p)}
                   />
-                  {preview ? (
-                    <div className="preview-pane">
-                      <div className="hint mono">{preview.path}</div>
-                      <pre>{preview.content.slice(0, 1200)}</pre>
-                    </div>
-                  ) : null}
                   {contextFiles.length > 0 ? (
                     <div className="ctx-chips">
                       {contextFiles.map((f) => (
@@ -2093,7 +2265,12 @@ export function LoomShell() {
               <section className="col composer-main">
                 <div className="col-hd">
                   <span>Composer</span>
-                  <span className="hint">{phaseLabel || "idle"}</span>
+                  <span className="hint">
+                    {phaseLabel || "idle"}
+                    {tokenUsage
+                      ? ` · 第 ${tokenUsage.step} 步 ↑${tokenUsage.input} ↓${tokenUsage.output}`
+                      : ""}
+                  </span>
                 </div>
                 {workflowBanner ? (
                   <div className="callout workflow-run-banner">
@@ -2116,325 +2293,540 @@ export function LoomShell() {
                     </button>
                   </div>
                 ) : null}
-                <div className="mode-tabs">
-                  {(
-                    [
-                      ["ask", "Ask · 只读"],
-                      ["agent", "Agent · 可写"],
-                      ["plan", "Plan · 并行"],
-                    ] as const
-                  ).map(([id, label]) => (
-                    <button
-                      key={id}
-                      type="button"
-                      className={studioMode === id ? "active" : ""}
-                      onClick={() => {
-                        setStudioMode(id);
-                        if (id === "ask" && agentId === "editor") {
-                          setAgentId("reader");
-                        }
-                        if (id === "agent" && agentId === "reader") {
-                          /* keep */
-                        }
-                      }}
-                    >
-                      {label}
-                    </button>
-                  ))}
+                <div className="main-subtabs" role="tablist" aria-label="中栏视图切换">
+                  <button
+                    type="button"
+                    role="tab"
+                    aria-selected={mainTab === "chat"}
+                    className={mainTab === "chat" ? "active" : ""}
+                    onClick={() => setMainTab("chat")}
+                  >
+                    AI 对话
+                  </button>
+                  <button
+                    type="button"
+                    role="tab"
+                    aria-selected={mainTab === "file"}
+                    className={mainTab === "file" ? "active" : ""}
+                    disabled={!preview}
+                    onClick={() => {
+                      if (preview) setMainTab("file");
+                    }}
+                    title={preview ? preview.path : "尚未选择文件"}
+                  >
+                    文件{preview ? ` · ${preview.path.split("/").pop() ?? ""}` : ""}
+                  </button>
                 </div>
-                <div className="col-bd composer-body">
-                  <ComposerThread
-                    items={thread}
-                    onApprove={(w) => void approveWrite(w)}
-                    onReject={(w) => void rejectWrite(w)}
-                    onApproveCmd={(c) => void approveCmd(c)}
-                    onRejectCmd={(c) => void rejectCmd(c)}
-                  />
-                </div>
-                <div className="composer-input">
-                  {mentionOpen ? (
-                    <div className="mention-menu">
-                      {treeFiles
-                        .filter((p) =>
-                          mentionQ
-                            ? p.toLowerCase().includes(mentionQ.toLowerCase())
-                            : true,
-                        )
-                        .slice(0, 12)
-                        .map((p) => (
+                {mainTab === "chat" ? (
+                  <>
+                    <div className="mode-tabs">
+                      {(
+                        [
+                          ["ask", "Ask · 只读"],
+                          ["agent", "Agent · 可写"],
+                          ["plan", "Plan · 并行"],
+                        ] as const
+                      ).map(([id, label]) => (
+                        <button
+                          key={id}
+                          type="button"
+                          className={studioMode === id ? "active" : ""}
+                          onClick={() => {
+                            setStudioMode(id);
+                            if (id === "ask" && agentId === "editor") {
+                              setAgentId("reader");
+                            }
+                            if (id === "agent" && agentId === "reader") {
+                              /* keep */
+                            }
+                          }}
+                        >
+                          {label}
+                        </button>
+                      ))}
+                    </div>
+                    <div className="col-bd composer-body">
+                      <ComposerThread
+                        items={thread}
+                        onApprove={(w) => void approveWrite(w)}
+                        onReject={(w) => void rejectWrite(w)}
+                        onApproveCmd={(c) => void approveCmd(c)}
+                        onRejectCmd={(c) => void rejectCmd(c)}
+                      />
+                      {/* Harness 事件轨迹：委派 / 压缩 / 用量都在这里，默认收起 */}
+                      <details className="harness-trace">
+                        <summary>
+                          Harness 事件轨迹 · {logs.length}
+                        </summary>
+                        <div className="log">
+                          {logs.length === 0 ? (
+                            <div className="line">
+                              <span>暂无事件。发起一次 Agent 运行后，委派、压缩与用量会记录在这里。</span>
+                            </div>
+                          ) : (
+                            logs
+                              .slice()
+                              .reverse()
+                              .map((l, i) => (
+                                <div className="line" key={`${String(l.t)}-${String(i)}`}>
+                                  <span className="mono">
+                                    {new Date(l.t).toLocaleTimeString()}
+                                  </span>{" "}
+                                  {l.text}
+                                </div>
+                              ))
+                          )}
+                        </div>
+                      </details>
+                    </div>
+                    <div className="composer-input">
+                      {mentionOpen ? (
+                        <div className="mention-menu">
+                          {treeFiles
+                            .filter((p) =>
+                              mentionQ
+                                ? p.toLowerCase().includes(mentionQ.toLowerCase())
+                                : true,
+                            )
+                            .slice(0, 12)
+                            .map((p) => (
+                              <button
+                                key={p}
+                                type="button"
+                                className="mention-item"
+                                onClick={() => {
+                                  void attachFile(p);
+                                  setGoal((g) => g.replace(/@[\w./-]*$/, `@${p} `));
+                                  setMentionOpen(false);
+                                }}
+                              >
+                                @{p}
+                              </button>
+                            ))}
+                        </div>
+                      ) : null}
+                      <textarea
+                        value={goal}
+                        onChange={(e) => {
+                          const v = e.target.value;
+                          setGoal(v);
+                          const m = v.match(/@([\w./-]*)$/);
+                          if (m) {
+                            setMentionOpen(true);
+                            setMentionQ(m[1] ?? "");
+                          } else {
+                            setMentionOpen(false);
+                          }
+                        }}
+                        placeholder={
+                          studioMode === "ask"
+                            ? "Ask：只读提问…  输入 @ 引用文件  /explore"
+                            : studioMode === "plan"
+                              ? "Plan：总目标… 然后启动并行 Board"
+                              : "Agent：任务… @文件 · ⌘K · ⌘↵ 发送"
+                        }
+                        onKeyDown={(e) => {
+                          if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
+                            e.preventDefault();
+                            void runSingle();
+                          }
+                          if (e.key === "Escape") setMentionOpen(false);
+                        }}
+                      />
+                      <div className="composer-bar">
+                        <div className="row-actions">
                           <button
-                            key={p}
                             type="button"
-                            className="mention-item"
+                            className="btn sm ghost"
+                            onClick={() => setPaletteOpen(true)}
+                          >
+                            ⌘K
+                          </button>
+                          <button
+                            type="button"
+                            className="btn sm ghost"
                             onClick={() => {
-                              void attachFile(p);
-                              setGoal((g) => g.replace(/@[\w./-]*$/, `@${p} `));
-                              setMentionOpen(false);
+                              setThread([]);
+                              newSession();
                             }}
                           >
-                            @{p}
+                            清空线程
                           </button>
-                        ))}
+                        </div>
+                        <div className="row-actions">
+                          {busy ? (
+                            <button
+                              type="button"
+                              className="btn sm danger"
+                              onClick={stop}
+                            >
+                              停止
+                            </button>
+                          ) : null}
+                          <button
+                            type="button"
+                            className="btn sm primary"
+                            disabled={busy || !goal.trim()}
+                            onClick={() => void runSingle()}
+                          >
+                            {busy
+                              ? "运行中…"
+                              : studioMode === "plan"
+                                ? "启动 Plan"
+                                : "发送 ⌘↵"}
+                          </button>
+                        </div>
+                      </div>
                     </div>
-                  ) : null}
-                  <textarea
-                    value={goal}
-                    onChange={(e) => {
-                      const v = e.target.value;
-                      setGoal(v);
-                      const m = v.match(/@([\w./-]*)$/);
-                      if (m) {
-                        setMentionOpen(true);
-                        setMentionQ(m[1] ?? "");
-                      } else {
-                        setMentionOpen(false);
-                      }
-                    }}
-                    placeholder={
-                      studioMode === "ask"
-                        ? "Ask：只读提问…  输入 @ 引用文件  /explore"
-                        : studioMode === "plan"
-                          ? "Plan：总目标… 然后启动并行 Board"
-                          : "Agent：任务… @文件 · ⌘K · ⌘↵ 发送"
-                    }
-                    onKeyDown={(e) => {
-                      if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
-                        e.preventDefault();
-                        void runSingle();
-                      }
-                      if (e.key === "Escape") setMentionOpen(false);
-                    }}
-                  />
-                  <div className="composer-bar">
-                    <div className="row-actions">
-                      <button
-                        type="button"
-                        className="btn sm ghost"
-                        onClick={() => setPaletteOpen(true)}
-                      >
-                        ⌘K
-                      </button>
-                      <button
-                        type="button"
-                        className="btn sm ghost"
-                        onClick={() => {
-                          setThread([]);
-                          newSession();
-                        }}
-                      >
-                        清空线程
-                      </button>
-                    </div>
-                    <div className="row-actions">
-                      {busy ? (
-                        <button
-                          type="button"
-                          className="btn sm danger"
-                          onClick={stop}
-                        >
-                          停止
-                        </button>
-                      ) : null}
-                      <button
-                        type="button"
-                        className="btn sm primary"
-                        disabled={busy || !goal.trim()}
-                        onClick={() => void runSingle()}
-                      >
-                        {busy
-                          ? "运行中…"
-                          : studioMode === "plan"
-                            ? "启动 Plan"
-                            : "发送 ⌘↵"}
-                      </button>
-                    </div>
+                  </>
+                ) : (
+                  <div className="col-bd file-view">
+                    {preview ? (
+                      <>
+                        <div className="file-view-hd">
+                          <span className="hint mono file-view-path" title={preview.path}>
+                            {preview.path}
+                          </span>
+                          <div className="row-actions">
+                            {contextFiles.some((f) => f.path === preview.path) ? (
+                              <button
+                                type="button"
+                                className="btn sm"
+                                onClick={() =>
+                                  setContextFiles((prev) =>
+                                    prev.filter((x) => x.path !== preview.path),
+                                  )
+                                }
+                              >
+                                移出 @context
+                              </button>
+                            ) : (
+                              <button
+                                type="button"
+                                className="btn sm"
+                                onClick={() =>
+                                  setContextFiles((prev) =>
+                                    [
+                                      ...prev,
+                                      { path: preview.path, content: preview.content },
+                                    ].slice(-4),
+                                  )
+                                }
+                              >
+                                附加为 @context
+                              </button>
+                            )}
+                            <button
+                              type="button"
+                              className="btn sm primary"
+                              onClick={() => setMainTab("chat")}
+                            >
+                              返回对话
+                            </button>
+                          </div>
+                        </div>
+                        <pre className="file-view-pre">{preview.content}</pre>
+                      </>
+                    ) : (
+                      <div className="empty composer-empty">
+                        <strong>尚未选择文件</strong>
+                        <p>在左侧 Explorer 点击文件，内容会在这里展示并自动附加为 @context。</p>
+                      </div>
+                    )}
                   </div>
-                </div>
+                )}
               </section>
 
-              <aside className="col">
-                <div className="col-hd">配置 / Diff HITL</div>
-                <div className="col-bd">
-                  <div className="field">
-                    <label>Agent</label>
-                    <select
-                      value={agentId}
-                      onChange={(e) => setAgentId(e.target.value)}
-                      disabled={studioMode === "ask"}
+              {configOpen ? (
+                <aside className="col config-panel">
+                  <div className="col-hd">
+                    <span>配置 / Diff HITL</span>
+                    <button
+                      type="button"
+                      className="btn sm ghost"
+                      title="收起配置面板"
+                      onClick={() => toggleConfigPanel(false)}
                     >
-                      {(meta?.agents ?? []).map((a) => (
-                        <option key={a.id} value={a.id}>
-                          {a.name}
-                        </option>
-                      ))}
-                    </select>
+                      收起 »
+                    </button>
                   </div>
-                  <div className="field">
-                    <label>Model</label>
-                    <select
-                      value={modelId}
-                      onChange={(e) => setModelId(e.target.value)}
-                    >
-                      {(meta?.models ?? []).map((m) => (
-                        <option
-                          key={m.id}
-                          value={m.id}
-                          disabled={!m.availability.ready}
-                        >
-                          {m.id}
-                          {!m.availability.ready ? "（未就绪）" : ""}
-                        </option>
-                      ))}
-                    </select>
-                  </div>
-                  <div className="field">
-                    <label>Skills</label>
-                    <div className="skill-toggles">
-                      {(meta?.skills ?? []).map((s) => {
-                        const on = skillIds.includes(s.id);
-                        return (
-                          <button
-                            key={s.id}
-                            type="button"
-                            className={on ? "on" : ""}
-                            onClick={() =>
-                              setSkillIds((prev) =>
-                                on
-                                  ? prev.filter((x) => x !== s.id)
-                                  : [...prev, s.id],
-                              )
-                            }
-                          >
-                            {s.name}
-                          </button>
-                        );
-                      })}
+                  <div className="col-bd">
+                    <div className="field">
+                      <label>Agent</label>
+                      <select
+                        value={agentId}
+                        onChange={(e) => setAgentId(e.target.value)}
+                        disabled={studioMode === "ask"}
+                      >
+                        {(meta?.agents ?? []).map((a) => (
+                          <option key={a.id} value={a.id}>
+                            {a.name}
+                          </option>
+                        ))}
+                      </select>
                     </div>
-                  </div>
-                  <div className="section-title">Changeset</div>
-                  {pendingWrites.length === 0 ? (
-                    <div className="empty">
-                      无线程待批。Agent 写文件后出现 Diff。
-                      {writeUndoStack.length > 0 ? (
-                        <div className="changeset-undo-hint">
-                          最近已批 {writeUndoStack.length} 个文件，可撤回。
+                    <div className="field">
+                      <label>Model</label>
+                      <select
+                        value={modelId}
+                        onChange={(e) => setModelId(e.target.value)}
+                      >
+                        {(meta?.models ?? []).map((m) => (
+                          <option
+                            key={m.id}
+                            value={m.id}
+                            disabled={!m.availability.ready}
+                          >
+                            {m.id}
+                            {!m.availability.ready ? "（未就绪）" : ""}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                    <div className="field">
+                      <label>
+                        Temperature
+                        <span className="mono" style={{ marginLeft: 8 }}>
+                          {temperature.toFixed(2)}
+                        </span>
+                      </label>
+                      <input
+                        type="range"
+                        min={0}
+                        max={1}
+                        step={0.05}
+                        value={temperature}
+                        onChange={(e) => setTemperature(Number(e.target.value))}
+                      />
+                    </div>
+                    <div className="field">
+                      <label>Skills</label>
+                      <div className="skill-toggles">
+                        {(meta?.skills ?? []).map((s) => {
+                          const on = skillIds.includes(s.id);
+                          return (
+                            <button
+                              key={s.id}
+                              type="button"
+                              className={on ? "on" : ""}
+                              onClick={() =>
+                                setSkillIds((prev) =>
+                                  on
+                                    ? prev.filter((x) => x !== s.id)
+                                    : [...prev, s.id],
+                                )
+                              }
+                            >
+                              {s.name}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
+                    <div className="section-title">Changeset</div>
+                    {pendingWrites.length === 0 ? (
+                      <div className="empty">
+                        无线程待批。Agent 写文件后出现 Diff。
+                        {writeUndoStack.length > 0 ? (
+                          <div className="changeset-undo-hint">
+                            最近已批 {writeUndoStack.length} 个文件，可撤回。
+                            <button
+                              type="button"
+                              className="btn sm"
+                              style={{ marginLeft: 8 }}
+                              onClick={() => void undoLastWrite()}
+                            >
+                              撤回最近一次
+                            </button>
+                            {writeUndoStack.length > 1 ? (
+                              <button
+                                type="button"
+                                className="btn sm danger"
+                                style={{ marginLeft: 6 }}
+                                onClick={() => void undoAllWrites()}
+                              >
+                                全部撤回
+                              </button>
+                            ) : null}
+                          </div>
+                        ) : null}
+                      </div>
+                    ) : (
+                      <>
+                        <div className="changeset-bar">
+                          <div className="changeset-stats">
+                            <span>
+                              {pendingWrites.length} 文件
+                            </span>
+                            <span className="ok">
+                              +
+                              {pendingWrites.reduce(
+                                (n, w) => n + (w.additions ?? 0),
+                                0,
+                              )}
+                            </span>
+                            <span className="danger">
+                              −
+                              {pendingWrites.reduce(
+                                (n, w) => n + (w.deletions ?? 0),
+                                0,
+                              )}
+                            </span>
+                          </div>
                           <button
                             type="button"
-                            className="btn sm"
-                            style={{ marginLeft: 8 }}
-                            onClick={() => void undoLastWrite()}
+                            className="btn ok sm"
+                            onClick={() => void acceptAllWrites()}
                           >
-                            撤回最近一次
+                            Accept all
                           </button>
+                          <button
+                            type="button"
+                            className="btn danger sm"
+                            onClick={() => void rejectAllWrites()}
+                          >
+                            Reject all
+                          </button>
+                          {writeUndoStack.length > 0 ? (
+                            <button
+                              type="button"
+                              className="btn sm"
+                              onClick={() => void undoLastWrite()}
+                              title="撤回最近一次已批准写入"
+                            >
+                              撤回已批
+                            </button>
+                          ) : null}
                           {writeUndoStack.length > 1 ? (
                             <button
                               type="button"
                               className="btn sm danger"
-                              style={{ marginLeft: 6 }}
                               onClick={() => void undoAllWrites()}
+                              title="撤回本会话全部已批准写入"
                             >
                               全部撤回
                             </button>
                           ) : null}
                         </div>
-                      ) : null}
+                        {pendingWrites.map((w) => (
+                          <div key={w.path} className="hitl">
+                            <DiffBlock
+                              path={w.path}
+                              diff={w.diff}
+                              additions={w.additions}
+                              deletions={w.deletions}
+                            />
+                            {!w.diff ? (
+                              <pre>{w.content.slice(0, 400)}</pre>
+                            ) : null}
+                            <div className="row-actions">
+                              <button
+                                type="button"
+                                className="btn ok sm"
+                                onClick={() => void approveWrite(w)}
+                              >
+                                Accept
+                              </button>
+                              <button
+                                type="button"
+                                className="btn danger sm"
+                                onClick={() => void rejectWrite(w)}
+                              >
+                                Reject
+                              </button>
+                            </div>
+                          </div>
+                        ))}
+                      </>
+                    )}
+                    <div className="section-title">
+                      Jobs
+                      <button
+                        type="button"
+                        className="btn sm"
+                        style={{ marginLeft: 8 }}
+                        onClick={() => void refreshJobs()}
+                      >
+                        刷新
+                      </button>
                     </div>
-                  ) : (
-                    <>
-                      <div className="changeset-bar">
-                        <div className="changeset-stats">
-                          <span>
-                            {pendingWrites.length} 文件
-                          </span>
-                          <span className="ok">
-                            +
-                            {pendingWrites.reduce(
-                              (n, w) => n + (w.additions ?? 0),
-                              0,
-                            )}
-                          </span>
-                          <span className="danger">
-                            −
-                            {pendingWrites.reduce(
-                              (n, w) => n + (w.deletions ?? 0),
-                              0,
-                            )}
-                          </span>
-                        </div>
-                        <button
-                          type="button"
-                          className="btn ok sm"
-                          onClick={() => void acceptAllWrites()}
-                        >
-                          Accept all
-                        </button>
-                        <button
-                          type="button"
-                          className="btn danger sm"
-                          onClick={() => void rejectAllWrites()}
-                        >
-                          Reject all
-                        </button>
-                        {writeUndoStack.length > 0 ? (
-                          <button
-                            type="button"
-                            className="btn sm"
-                            onClick={() => void undoLastWrite()}
-                            title="撤回最近一次已批准写入"
-                          >
-                            撤回已批
-                          </button>
-                        ) : null}
-                        {writeUndoStack.length > 1 ? (
-                          <button
-                            type="button"
-                            className="btn sm danger"
-                            onClick={() => void undoAllWrites()}
-                            title="撤回本会话全部已批准写入"
-                          >
-                            全部撤回
-                          </button>
-                        ) : null}
+                    {jobs.length === 0 ? (
+                      <div className="hint">
+                        没有后台 job。批准一条带「后台」标记的 run_safe_cmd
+                        后，它会出现在这里。
                       </div>
-                      {pendingWrites.map((w) => (
-                      <div key={w.path} className="hitl">
-                        <DiffBlock
-                          path={w.path}
-                          diff={w.diff}
-                          additions={w.additions}
-                          deletions={w.deletions}
-                        />
-                        {!w.diff ? (
-                          <pre>{w.content.slice(0, 400)}</pre>
-                        ) : null}
-                        <div className="row-actions">
-                          <button
-                            type="button"
-                            className="btn ok sm"
-                            onClick={() => void approveWrite(w)}
-                          >
-                            Accept
-                          </button>
-                          <button
-                            type="button"
-                            className="btn danger sm"
-                            onClick={() => void rejectWrite(w)}
-                          >
-                            Reject
-                          </button>
-                        </div>
+                    ) : (
+                      jobs
+                        .slice(-5)
+                        .reverse()
+                        .map((j) => (
+                          <div key={j.id} className="hitl">
+                            <div className="tool-hd">
+                              <span className="mono">
+                                {j.id} · {j.command}
+                              </span>
+                              <span
+                                className={`badge ${
+                                  j.status === "running"
+                                    ? "running"
+                                    : j.status === "done"
+                                      ? "done"
+                                      : "failed"
+                                }`}
+                              >
+                                {j.status}
+                              </span>
+                            </div>
+                            <pre>{j.tail?.slice(-300) || "（还没有输出）"}</pre>
+                            <div className="hint">
+                              {(j.elapsedMs / 1000).toFixed(1)}s
+                              {j.exitCode != null ? ` · exit ${j.exitCode}` : ""}
+                            </div>
+                            {j.status === "running" ? (
+                              <div className="row-actions">
+                                <button
+                                  type="button"
+                                  className="btn danger sm"
+                                  onClick={() => void killJob(j.id)}
+                                >
+                                  停
+                                </button>
+                              </div>
+                            ) : null}
+                          </div>
+                        ))
+                    )}
+                    {answer ? (
+                      <>
+                        <div className="section-title">Latest answer</div>
+                        <div className="answer">{answer}</div>
+                      </>
+                    ) : null}
+                    {pendingWrites.length + pendingCmds.length > 0 ? (
+                      <div className="hint" style={{ marginTop: 10 }}>
+                        {pendingWrites.length + pendingCmds.length} 项待审批
                       </div>
-                    ))}
-                    </>
-                  )}
-                  {answer ? (
-                    <>
-                      <div className="section-title">Latest answer</div>
-                      <div className="answer">{answer}</div>
-                    </>
-                  ) : null}
-                </div>
-              </aside>
+                    ) : null}
+                  </div>
+                </aside>
+              ) : (
+                <aside className="col config-rail">
+                  <button
+                    type="button"
+                    className="config-expand"
+                    title="展开配置面板"
+                    onClick={() => toggleConfigPanel(true)}
+                  >
+                    <span className="config-expand-ico">»</span>
+                    <span>
+                      配置 / HITL
+                      {pendingWrites.length + pendingCmds.length > 0
+                        ? `（${pendingWrites.length + pendingCmds.length} 待批）`
+                        : ""}
+                    </span>
+                  </button>
+                </aside>
+              )}
             </div>
           ) : null}
 
@@ -2468,6 +2860,49 @@ export function LoomShell() {
                         </option>
                       ))}
                     </select>
+                  </div>
+                  <div className="field">
+                    <label>失败重试（每个 Worker）</label>
+                    <select
+                      value={planRetries}
+                      onChange={(e) => setPlanRetries(Number(e.target.value))}
+                    >
+                      <option value={0}>不重试</option>
+                      <option value={1}>重试 1 次（默认）</option>
+                      <option value={2}>重试 2 次</option>
+                      <option value={3}>重试 3 次</option>
+                    </select>
+                  </div>
+                  <div className="field">
+                    <label>
+                      <input
+                        type="checkbox"
+                        checked={planPlanner}
+                        onChange={(e) => setPlanPlanner(e.target.checked)}
+                        style={{ marginRight: 6 }}
+                      />
+                      让模型拆步（一次调用出带依赖的 Worker 清单）
+                    </label>
+                    {planPlanner ? (
+                      <select
+                        value={planPlannerModel || meta?.preferredModelId || ""}
+                        onChange={(e) => setPlanPlannerModel(e.target.value)}
+                      >
+                        {(meta?.models ?? []).map((m) => (
+                          <option
+                            key={m.id}
+                            value={m.id}
+                            disabled={!m.availability.ready}
+                          >
+                            {m.label ?? m.id}
+                            {m.availability.ready ? "" : "（没配 Key）"}
+                          </option>
+                        ))}
+                      </select>
+                    ) : null}
+                    <small>
+                      拆不成（没真模型 / 模型没给可解析清单）就回落预设，历史里写明原因
+                    </small>
                   </div>
                   {planPreset === "custom" ? (
                     <div className="board">
@@ -2519,6 +2954,31 @@ export function LoomShell() {
                               ))}
                             </select>
                           </div>
+                          <div className="field">
+                            <label>依赖（下标，逗号分隔，可空）</label>
+                            <input
+                              value={(w.dependsOn ?? []).join(",")}
+                              placeholder="例如 0,1 —— 留空表示可与同批并行"
+                              onChange={(e) => {
+                                const next = [...workers];
+                                const parsed = e.target.value
+                                  .split(/[,，\s]+/)
+                                  .map((x) => Number(x.trim()))
+                                  .filter(
+                                    (n) =>
+                                      Number.isInteger(n) &&
+                                      n >= 0 &&
+                                      n < workers.length &&
+                                      n !== i,
+                                  );
+                                next[i] = {
+                                  ...w,
+                                  dependsOn: parsed.length ? parsed : undefined,
+                                };
+                                setWorkers(next);
+                              }}
+                            />
+                          </div>
                         </div>
                       ))}
                     </div>
@@ -2547,24 +3007,47 @@ export function LoomShell() {
               <section className="col">
                 <div className="col-hd">Board</div>
                 <div className="col-bd">
+                  {planPlannerNote ? (
+                    <div className="callout">{planPlannerNote}</div>
+                  ) : null}
                   <div className="board">
                     {steps.length === 0 ? (
                       <div className="empty">尚未运行。</div>
                     ) : (
-                      steps.map((s) => (
-                        <div key={s.id} className="step">
-                          <div className="meta">
-                            <strong>{s.title}</strong>
-                            <span className={`badge ${s.status}`}>{s.status}</span>
+                      steps.map((s, i) => {
+                        const batchIdx = planBatches.findIndex((b) =>
+                          b.includes(i),
+                        );
+                        return (
+                          <div key={s.id} className="step">
+                            <div className="meta">
+                              <strong>{s.title}</strong>
+                              <span className={`badge ${s.status}`}>
+                                {s.status}
+                              </span>
+                              {batchIdx >= 0 && planBatches.length > 1 ? (
+                                <span className="badge">
+                                  第 {batchIdx + 1} 批
+                                </span>
+                              ) : null}
+                              {s.attempts && s.attempts > 1 ? (
+                                <span className="badge">
+                                  重试 {s.attempts - 1} 次
+                                </span>
+                              ) : null}
+                            </div>
+                            <div className="hint">
+                              {s.agentId} · {s.modelId}
+                              {s.dependsOnIds?.length
+                                ? ` · 依赖 ${s.dependsOnIds.join(", ")}`
+                                : ""}
+                            </div>
+                            <pre className="log" style={{ marginTop: 8 }}>
+                              {s.error || s.resultPreview || "…"}
+                            </pre>
                           </div>
-                          <div className="hint">
-                            {s.agentId} · {s.modelId}
-                          </div>
-                          <pre className="log" style={{ marginTop: 8 }}>
-                            {s.error || s.resultPreview || "…"}
-                          </pre>
-                        </div>
-                      ))
+                        );
+                      })
                     )}
                   </div>
                   {merged ? (
@@ -2964,12 +3447,12 @@ export function LoomShell() {
                 {(skillDetails.length > 0
                   ? skillDetails
                   : (meta?.skills ?? []).map((s) => ({
-                      ...s,
-                      body: "",
-                      bodyPreview: "",
-                      chars: 0,
-                      builtin: true,
-                    }))
+                    ...s,
+                    body: "",
+                    bodyPreview: "",
+                    chars: 0,
+                    builtin: true,
+                  }))
                 ).map((s) => (
                   <div key={s.id} className="card">
                     <h3>
@@ -3103,11 +3586,10 @@ export function LoomShell() {
                       <h3>
                         web_search{" "}
                         <span
-                          className={`badge ${
-                            meta.capabilitySettings.search.configured
-                              ? "done"
-                              : "pending"
-                          }`}
+                          className={`badge ${meta.capabilitySettings.search.configured
+                            ? "done"
+                            : "pending"
+                            }`}
                         >
                           {meta.capabilitySettings.search.configured
                             ? "live"

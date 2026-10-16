@@ -1,0 +1,7 @@
+{
+  "name": "hello-plugin",
+  "version": "0.1.0",
+  "description": "最小示例插件：注册一个 echo 工具和一个仓库字数统计工具",
+  "main": "index.mjs",
+  "author": "loom"
+}

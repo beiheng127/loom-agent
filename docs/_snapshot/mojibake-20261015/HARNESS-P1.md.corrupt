@@ -1,0 +1,214 @@
+﻿# Loom Agent 路 P1:浠庛€屾湁涓惊鐜€嶅埌銆屾湁 harness銆?
+> 2026-10-15銆侾0 鎶婂亣鐨勫伐鍏峰崗璁崲鎴愪簡鐪熺殑锛堣 [`HARNESS-UPGRADE.md`](./HARNESS-UPGRADE.md)锛夈€?> 杩欎唤鏂囨。璁板綍 P1锛?*鎶?harness 鐨勫叾浣欏唴鑴忚ˉ榻愬苟鎺ヨ繘浜у搧**銆?> 鐘舵€侊細**璁捐瀹屾垚搴?60%**锛屼氦浣犺嚜娴嬨€傛病鍋氬畬鐨勯儴鍒嗗湪 搂6 鏄庡啓锛屼笉钘忋€?
+---
+
+## 0. 鍏堣闅惧惉鐨?
+銆宎gent = 妯″瀷 + harness銆嶃€侾0 涔嬪墠杩欎釜椤圭洰鐨勬ā鍨嬫槸涓?*鏂囨湰鐢熸垚鍣?*锛?瀹冨拰浠ｇ爜涔嬮棿闈犳鍒欐姞 JSON 娌熼€氥€傜幇鍦ㄦā鍨嬫槸鐪熶細鍙?tool call 浜嗐€?
+浣嗙炕瀹?P1 涔嬪墠鐨勪唬鐮侊紝杩樻湁鍑犲彞瀹炶瘽锛?
+1. **鑳藉姏閫犲嚭鏉ヤ簡锛屼絾浜у搧澶熶笉鐫€銆?* todo 鎶曞奖銆佸瓙 agent 濮旀淳銆佹彃浠躲€侀绠?   鍏ㄩ兘鍐欏湪 `packages/core` 閲岋紝鑰?`apps/web` 閲?grep 杩欎簺璇嶁€斺€?*闆跺懡涓?*銆?   閫犱簡娌′汉鑳界敤锛岀瓑浜庢病閫犮€傝繖鏄?P1 鏈€璇ヤ慨鐨勪竴浠朵簨銆?2. **`Plan Board 缂栨帓鍣╜ 杩欎釜鍚嶅瓧鎾戜笉浣忋€?* `orchestrator.ts` 閲屾病鏈?Planner
+   LLM銆佹病鏈?DAG銆佹病鏈?retry銆佹病鏈夋姇绁ㄦ嫨浼橈紝灏辨槸 `Promise.all` 鎵囧嚭 + 瀛楃涓叉嫾鎺ャ€?   鍑嗙‘鐨勮娉曟槸 **Parallel Fan-out**銆傜畝鍘嗕笂鍐欍€岀紪鎺掑櫒銆嶄細琚棶濉屻€?3. **涓婁笅鏂囨案杩滀笉浼氬帇缂┿€?* `run.ts` 鍘熸潵鍐欐 `history.slice(-12)`锛?   鏃笉璁￠噺涔熶笉鍘嬬缉鈥斺€斿杞暱浠诲姟蹇呯劧鐖嗕笂涓嬫枃锛岃€屼唬鐮侀噷杩炪€岀垎浜嗐€嶈繖浠朵簨閮界湅涓嶈銆?4. **瀹夊叏娲炴槸鐪熺殑銆?* `cmd.ts` 鐨勭櫧鍚嶅崟鎷︽埅瀛楃琛ㄦ紡浜?`>` 鍜?`<`锛?   鑰?`spawn` 鐢ㄧ殑鏄?`shell:true`銆傚疄娴?`git status > ../../evil.txt` 鑳借繃鐧藉悕鍗曪紝
+   **鍐欏埌宸ヤ綔鍖哄闈㈠幓**銆傝繖涓嶆槸鐞嗚椋庨櫓锛屾槸澶嶇幇杩囩殑銆?5. **娌℃湁 git銆佹病鏈?CI銆佹病鏈?LICENSE銆?* 杩滅 `pushed_at` 鍋滃湪 2026-09-09锛?   10 鏈堢殑鎵€鏈夋敼閫犱竴涓瓧鑺傞兘娌℃帹涓婂幓銆?
+杩欎簲鏉℃槸 P1 鐨勬柦宸ユ竻鍗曘€?
+---
+
+## 1. P1 鍋氫簡浠€涔?
+瀵圭収 DSH锛圖eepSeek Harness锛夌殑鎻掍欢瀹炰綋閫愭潯绉绘銆傝璁″師鍒欏彧鏈変竴鏉★細
+**鑳芥妱 DSH 鐨勯粯璁ゅ€煎拰鍏紡灏辨妱锛屾妱涓嶄簡鐨勫啓娓呮宸紓锛屼笉鍋囪涓€鏍枫€?*
+
+### 灞?3 路 涓婁笅鏂囧帇缂╋紙瀵规爣 `dsh-compaction-basic`锛?
+鏂板缓 `packages/core/src/loop/compact.ts`銆?
+| 椤?| DSH 榛樿鍊?| Loom 瀹炵幇 |
+|---|---|---|
+| `thresholdRatio` | 0.8 | 0.8 |
+| `headroomTokens` | 65536 | 65536 |
+| `retainRatio` | 0.16 | 0.16 |
+| `maxOutputTokens` | 鈥?| 8192 |
+| 瑙﹀彂闃堝€?| `floor(min(W脳0.8, W鈭扥鈭払))` | 鍚屽紡 |
+| 淇濈暀棰勭畻 | `(W鈭扥)脳0.16` | 鍚屽紡 |
+
+- 鍘嬬缉鏃舵妸鏈€鏃х殑涓€娈垫崲鎴?*涓€鏉℃憳瑕佹秷鎭?* `<context_summary>鈥?/context_summary>`锛?  杩戞湡灏鹃儴**閫愬瓧淇濈暀**銆?- **杈圭晫瀹夊叏**锛氫繚鐣欒捣鐐瑰彧鍏佽钀藉湪 `role === "user"` 涓婏紝缁濅笉鍒囧紑
+  tool-call / tool-result 閰嶅銆傚垏涓嶅姩灏变笉鍘嬨€?- **澶辫触涓嶉潤榛?*锛氭憳瑕佹ā鍨嬫姏閿?鈫?`鎽樿鐢熸垚澶辫触锛?msg>`锛涙病鍐呭鍙帇 鈫?  `娌℃湁鍙畨鍏ㄥ帇缂╃殑鏃у唴瀹筦锛涙瘡绉嶉兘缁欏緱鍑?`reason`锛屽苟閫氳繃 `compacted` 浜嬩欢涓婃姤銆?- 瀹归噺**涓嶈嚜宸辩寽**锛歚contextWindow` 鏀惧湪 `ModelConfig` 涓婏紙瀵规爣 DSH
+  `ctx.llm.resolveModelInfo().context`鈥斺€斿閲忓睘浜庤矾鐢憋紝涓嶅睘浜庡帇缂╁櫒锛夈€?  mock 鏁呮剰鍙粰 32000锛屼负鐨勬槸璁╃绾挎紨绀鸿兘浣庢垚鏈Е鍙戝帇缂┿€?
+### 灞?4 路 瀛?Agent 濮旀淳锛堝鏍?`dsh-tool-subagent` + `dsh-tool-subagent-control`锛?
+鏂板缓 `packages/core/src/agents/subagents.ts`銆?
+- **涓€涓娲剧洰鏍?= 涓€涓伐鍏峰疄渚嬶紝`toolName` 蹇呴』浜掍笉鐩稿悓銆?*
+  鍐呯疆 `orchestrator` 鎸備簡涓変釜锛歚subagent_recon` / `subagent_design` / `subagent_verify`銆?- 濮旀淳鑳藉姏**鐢?Agent 妗ｆ鑷繁澹版槑**锛坄AgentProfile.subagents`锛夛紝
+  鍔犱竴涓€岃兘娲?3 涓瓙 agent銆嶇殑 Agent锛屽彧鏀?`profiles.ts` 涓€澶勶紝UI 涓嶇敤纭紪鐮併€?- `maxDepth` 榛樿 1锛涜秴闄愭椂宸ュ叿**浠嶇劧鍙**锛岃皟鐢ㄦ墠杩斿洖閿欒鈥斺€斿鏍?DSH銆?- **姘镐笉鏀炬潈**锛氬瓙 agent 宸ュ叿鐧藉悕鍗?= 鐖剁骇 `allowedTools` 鈭?spec 鐧藉悕鍗曘€?- 瀛?agent 榛樿**缁ф壙鐖剁骇 modelId**銆傜悊鐢辩収鎶?DSH锛歠ork 鍨嬪瓙 agent 瑕嗙洊璺敱
+  浼氳 KV Cache 鍓嶇紑澶辨晥銆?- 鎺у埗宸ュ叿涓変釜锛歚list_agents` / `send_message` / `interrupt_agent`銆?  `send_message` **鍙洖 messageId銆佺粷涓嶅洖鍐呭**鈥斺€旇繖鏄?steering 涓嶆槸闂瓟銆?- 鍓嶅彴璋冪敤涓?`send_message` 鍞ら啋**璧板悓涓€涓?`runSubagentTurn`**銆?  涓ゆ潯璺悇鍐欎竴浠芥槸杩欑被绯荤粺鏈€甯歌鐨勫潙銆?- 瀛?agent 涓棿姝ラ**涓嶅洖娴?*鐖剁骇浜嬩欢娴侊紝鐖剁骇鍙嬁鍒版渶缁堟枃鏈€?
+**濡傚疄鏍囨敞鐨勫樊寮?*锛堝啓鍦ㄦ簮鐮佹敞閲婇噷锛夛細DSH 鐨?steering 鍦?*姝ラ杈圭晫**鎶曢€掞紝
+loom 涓€涓瓙 agent 涓€杞氨鏄竴涓?`streamText` 璇锋眰锛屼腑閫旀病娉曟敞鍏ワ紝
+鎵€浠ユ姇閫掔偣鏄?*杞杈圭晫**銆備笉鍚规垚鍚屾銆?
+### 灞?5 路 TODO锛堝鏍?`dsh-tool-todo`锛?
+鏂板缓 `packages/core/src/plan/todo.ts`銆?
+- **鏁磋〃鏇挎崲**锛屾棤閮ㄥ垎鏇存柊銆佹棤鍥炶宸ュ叿銆?- 鎴愬姛鏂囨閫愬瓧锛歚Updated todo list: <p> pending, <i> in progress, <c> completed.`
+- 鍥涙潯澶辫触鏂囨閫愬瓧瀵归綈锛屽惈
+  ``Error: invalid todo: `content` must be a non-empty string``
+  涓?`Error: invalid todos: at most one task may be in progress (got <n>)`銆?- **鍗曚竴鎵€鏈夎€?*锛氬垪琛ㄥ睘浜庡垱寤哄畠鐨?agent 浼氳瘽锛涢潪 agent 璋冪敤鏂硅鎷掋€?- 鎶曞奖锛氶娆″啓鍏ュ墠涓?null锛?*涓嬩竴杞寮€濮嬫椂娓呯┖**锛宍turn/end` 淇濈暀鍒氬畬鎴愮殑娓呭崟銆?
+**宸茬煡宸窛锛堜唬鐮佹敞閲婇噷涔熷啓浜嗭級**锛氫簨浠舵棩蹇楀湪杩涚▼鍐呭瓨閲岋紝閲嶅惎鍗充涪銆?DSH 鏄啓杩涗細璇濇棩蹇楁枃浠剁殑鈥斺€旇繖鎵嶆槸瀹冦€屾棩蹇楁壙杞界姸鎬併€嶇殑鐪熸鍚箟銆傛爣涓烘湭瀹屾垚銆?
+### 灞?6 路 鎻掍欢绯荤粺锛堝鏍?DSH 鐨?cordis 鎻掍欢褰㈡€侊級
+
+鏂板缓 `packages/core/src/plugins/`銆?
+- 纾佺洏濂戠害锛歚plugins/<name>/loom-plugin.json` + `index.mjs`锛岄浂鏂颁緷璧栥€?- 娓呭崟瀛楁 `name` / `version` 蹇呭～锛宍main` / `enabled` 鍙€夈€?- 鍔ㄦ€?`import(pathToFileURL(...))`锛屾敮鎸?`{tools}` 涓?`{default:{tools}}` 涓ょ瀵煎嚭銆?- **澶辫触闅旂**锛氬崟涓彃浠剁偢浜嗚鎴?`error` 瀛楁缁х画璺戯紝涓嶆嫋鍨?Agent 寰幆銆?- 宸ュ叿鍚嶅繀椤诲尮閰?`/^[a-z][a-z0-9_]*$/`锛屼笌鍐呯疆鍚屽悕鍒欎涪寮冨苟璁?warning銆?- 绀轰緥鎻掍欢 `plugins/hello-plugin/`锛歚hello_echo` + `repo_wordcount`銆?
+### 椤烘墜琛ョ殑瀹夊叏娲?
+`packages/core/src/tools/cmd.ts` 鎶藉嚭 `DANGEROUS_CHARS`锛?
+```ts
+const DANGEROUS_CHARS = ["|", ";", "&", "`", "$(", ">", "<", "\n", "\r"] as const;
+```
+
+`>` 鍜?`<` 鏄繖娆¤ˉ涓婄殑銆俙spawn(..., {shell:true})` 鐨勫畨鍏ㄦ€?100% 渚濊禆杩欏紶琛紝
+鎵€浠ヨ〃鏃佽竟鐣欎簡娉ㄩ噴锛?*鏀硅繖寮犺〃 = 鏀规敾鍑婚潰**銆?
+### 鎺ヨ繘浜у搧锛堣繖鎵嶆槸 P1 鐨勯噸鐐癸級
+
+閫犲嚭鏉ュ涓嶇潃锛岀瓑浜庢病閫犮€傛墍浠ワ細
+
+- **涓や釜杩愯璺敱**锛坄/api/run`銆乣/api/run/stream`锛夋帴鍙?`sessionId` / `plugins` / `budget`锛?  鍔犺浇鎻掍欢宸ュ叿褰?`extraTools` 娉ㄥ叆寰幆銆?- **`/api/meta`** 鏂板 `harness` 娈碉細鎻掍欢娓呭崟 + 姣忎釜 Agent 鐨勫娲惧伐鍏蜂笌 `maxDepth`銆?- **`LoomShell.tsx`** 琛ヤ簡 UI 鐪熸缂虹殑涓滆タ锛?  - `sessionId` 鍦ㄩ娆?run 鏃剁敓鎴愬苟闅?body 鍙戝嚭鈥斺€?*鍦ㄦ涔嬪墠 todo 杩欐潯鑳藉姏鍦?UI 閲屾案杩滆蛋涓嶅埌**銆?  - SSE 浜嬩欢閾炬柊澧?`subagent_start` / `subagent_end` / `compacted` / `usage` 鍥涗釜鍒嗘敮銆?    涔嬪墠杩欎簺浜嬩欢**钀借繘 if/else 閾句細琚潤榛樹涪寮?*銆?  - Composer 鏍囬鏍忔樉绀烘瘡涓€姝ョ殑 `鈫慽nput 鈫搊utput` token 鏁般€?- **mock 涔熻鐪嬪緱瑙佸畬鏁村伐鍏烽泦**锛歚resolveMockScenario` 鐨勫叆鍙備粠銆屽唴缃伐鍏枫€?  鏀规垚銆屽悎骞跺悗鐨勫叏閮ㄥ伐鍏枫€嶏紝骞舵柊澧?`delegate_fanout` 鍦烘櫙銆?  鍚﹀垯銆屾淳瀛?agent銆嶈繖鏉¤矾寰勫彧鍦ㄧ湡妯″瀷涓嬪瓨鍦紝绂荤嚎婕旂ず姘歌繙婕斾笉鍑烘潵銆?
+### 涓€涓彧鏈夎捣浜у搧鎵嶄細鏆撮湶鐨?bug锛堣涓€绗旓級
+
+鎻掍欢鍦?*绾?Node 涓嬪姞杞芥甯?*锛堝崟娴嬨€丆LI銆佹帰閽堝叏杩囷級锛屼絾涓€璧?Studio 灏辨姤锛?
+```
+Cannot find module 'file:///C:/Users/ruia3/Desktop/test/agent/plugins/hello-plugin/index.mjs'
+```
+
+鏍瑰洜鏄?`apps/web/next.config.ts` 閲岀殑 `transpilePackages: ["@loom/core"]` 鈥斺€?webpack 浼氭妸
+`registry.ts` 閲岄偅琛屽姩鎬?`import(pathToFileURL(entryPath).href)` 缂栬瘧鎴愪竴涓?context module锛?杩愯鏃舵寜銆岀浉瀵?bundle銆嶅幓瑙ｆ瀽锛岃€屾彃浠跺叆鍙ｆ槸纾佺洏涓婄殑缁濆 `file://` URL锛屽繀鐒舵壘涓嶅埌銆?
+淇硶鏄粰瀹冨姞 webpack 鐨勯瓟娉曟敞閲婏紝璁?bundler 鍘熸牱鏀捐銆佷氦缁?Node 鐨?ESM loader锛?
+```ts
+await import(/* webpackIgnore: true */ pathToFileURL(entryPath).href);
+```
+
+**鏁欒**锛氳繖娆℃槸 `next build` 鏃╁氨鎶ヨ繃 `Critical dependency: the request of a dependency is
+an expression` 杩欐潯 warning锛屽綋鏃跺綋鎴愩€孨ext 甯歌鍛婅銆嶇暐杩囦簡 鈥斺€?瀹冨氨鏄悓涓€涓?bug 鐨勯鍛娿€?**搴撶骇娴嬭瘯鍏ㄧ豢涓嶇瓑浜庝骇鍝佽兘璺?*锛氳兘鍔涘繀椤讳粠 HTTP 闈㈠啀楠屼竴閬嶏紝鎵€浠ヨ繖杞ˉ浜?`scripts/probes/http.mjs`锛?2 椤规柇瑷€锛岃 搂2锛夈€?
+---
+
+## 2. 瀹炴祴鏁板瓧锛堜笉鏄舰瀹硅瘝锛?
+鍏ㄩ儴鍦?`C:\Users\ruia3\Desktop\test\agent\` 涓嬭窇鍑烘潵鐨勩€?
+| 妫€鏌ラ」 | 鍛戒护 | 缁撴灉 |
+|---|---|---|
+| core 绫诲瀷妫€鏌?| `tsc -p packages/core/tsconfig.json --noEmit` | **EXIT=0** |
+| web 绫诲瀷妫€鏌?| `cd apps/web; tsc --noEmit` | **EXIT=0** |
+| core 缂栬瘧 | `npm run build:core` | **EXIT=0** |
+| 鍗曟祴 | `node --test "packages/core/test/*.test.mjs"` | **55 / 55 pass, 0 fail** |
+| 绂荤嚎 Demo | `node packages/core/dist/demo.js` | **EXIT=0**锛屽悓璐ㄥ弻绾跨▼ 228ms/230ms锛涘紓鏋?Reader 191ms + Editor 127ms锛宲endingWrites=1 |
+| web 鏋勫缓 | `cd apps/web; npx next build` | **EXIT=0**锛?0 鏉¤矾鐢憋紙鍚柊澧?`/api/plugins`锛?|
+| **HTTP 绔埌绔?* | `node scripts/probes/http.mjs`锛堥渶鍏?`npm run studio`锛?| **12 / 12 pass** |
+| 鐧藉悕鍗曞畨鍏?| `isSafeCommand('git status > ../../evil.txt')` | 鏀瑰姩鍓?`true`锛堝彲瓒婄晫鍐欙級鈫?鐜板湪 **`false`** |
+
+**瑙勬ā**锛歚packages/core/src` 27 涓?`.ts`銆?*5793 琛?*锛涘崟娴?4 涓枃浠?锛坄loop.test.mjs` 319 / `compact.test.mjs` 331 / `todo-plugin.test.mjs` 329 / `helpers.mjs` 71锛夈€?
+**绔埌绔帰閽?*锛坄tmp-probe-harness.mjs`锛岀湡瀹炶窇涓€閬嶄笉鏄焊涓婃帹婕旓級锛?
+```
+plugins: [ { name: 'hello-plugin', tools: [ 'hello_echo', 'repo_wordcount' ] } ]
+plugin tool defs: [ 'hello_echo', 'repo_wordcount' ]
+orchestrator subagents: [ 'subagent_recon', 'subagent_design', 'subagent_verify' ]
+
+event types: phase, compacted, text_delta, text, tool_input_delta,
+             subagent_start, tool_call, subagent_end, tool_result, usage, done
+counts: {"phase":4,"compacted":1,"text_delta":11,"text":2,"tool_input_delta":12,
+         "subagent_start":2,"tool_call":2,"subagent_end":2,"tool_result":2,"usage":3,"done":1}
+subagent_start: [ 'subagent_recon', 'subagent_recon' ]
+subagent_end statuses: [ 'inactive', 'inactive' ]
+```
+
+鍗筹細**鎻掍欢鍔犺浇 鈫?濮旀淳宸ュ叿鍙 鈫?瀛?agent 鐪熻娲惧嚭 鈫?缁撴灉鍥炴祦 鈫?璁￠噺閫愭涓婃姤**锛?鏁存潯閾捐矾鍦ㄧ绾?mock 涓嬭窇閫氥€?
+### 鍓嶅悗瀵规瘮
+
+| 缁村害 | P0 涔嬪墠 | 鐜板湪 |
+|---|---|---|
+| 宸ュ叿鍗忚 | 姝ｅ垯浠庤嚜鐢辨枃鏈姞 JSON | AI SDK v6 鍘熺敓 tool call |
+| 澶氭 | 鎵嬪啓 `while` + `parseAction` | `stopWhen: stepCountIs(n)` |
+| 璁￠噺 | 鏃?| 姣忔 usage 浜嬩欢 + 棰勭畻鐔旀柇 |
+| 涓婁笅鏂?| `history.slice(-12)` 姝绘埅鏂?| 0.8/0.16 闃堝€煎帇缂?+ 鎽樿 |
+| 濮旀淳 | 鏃?| 姣?Agent 鍙寕澶氫釜瀛?agent 宸ュ叿 |
+| 鎻掍欢 | 鏃?| 鐩綍 + 娓呭崟 + 澶辫触闅旂 |
+| 瀹夊叏 | `>` `<` 鏈嫤锛堝彲瓒婄晫鍐欙級 | 宸叉嫤 |
+| 鍗曟祴 | **0** | **55** |
+| UI 鍙鎬?| 鈥?| 濮旀淳/鍘嬬缉/token 涓夌被浜嬩欢宸叉覆鏌?|
+
+---
+
+## 3. 鎬庝箞鑷祴
+
+```bash
+cd C:\Users\ruia3\Desktop\test\agent
+
+# 1) 闂ㄧ涓夎繛
+npm run typecheck
+npm run build:core
+npm test                       # 鏈熸湜 55 pass
+
+# 2) 绂荤嚎 Demo锛堜笉闇€瑕佷换浣?Key锛?node packages/core/dist/demo.js
+
+# 3) 绔埌绔帰閽堬細鎻掍欢 + 濮旀淳 + 璁￠噺锛堝簱绾э級
+node scripts/probes/harness.mjs
+
+# 4) 璧?Studio 鐪?UI
+npm run studio                 # 鈫?http://localhost:3010
+
+# 5) HTTP 绔埌绔帰閽堬紙鍙︿竴涓粓绔紝Studio 璧风潃鏃惰窇锛?#    楠岀殑鏄€岃兘鍔涚湡鐨勪粠 API 璺敱鏆撮湶鍑烘潵銆嶁€斺€斿簱绾ф帰閽堟煡涓嶅嚭 webpack 閭ｇ被闂
+node scripts/probes/http.mjs
+```
+
+UI 閲岄噸鐐圭湅涓夊锛堣繖鏄?P1 鏂板鐨勫彲瑙嗚瘉鎹級锛?
+1. **Composer 鏍囬鏍?*锛氳窇璧锋潵鍚庡簲璇ュ嚭鐜?`绗?N 姝?鈫憍 鈫搚`銆?2. **閫?`orchestrator` Agent 闂€屾淳瀛?agent 骞惰鐩樼偣銆?*锛?   绾跨▼閲屽簲鍑虹幇瀛?agent 鐨?call/ok 鍗＄墖锛屼笖**瀛?agent 鐨勪腑闂存楠や笉浼氶摵婊＄嚎绋?*銆?3. **澶氳疆瀵硅瘽鎶婁笂涓嬫枃鍫嗚繃 0.8 闃堝€?*锛氬簲鍑虹幇 `context_compact` 鍗＄墖锛?   甯︺€屽帇缂╀簡 N 鏉″巻鍙诧紝浼扮畻閲婃斁 X tokens銆嶃€?   娉ㄦ剰涓や釜鍚嶅瓧涓嶆槸涓€鍥炰簨锛?*浜嬩欢鍚嶆槸 `compacted`**锛屽崱鐗囧悕鍙?`context_compact`
+   锛坄LoomShell.tsx:1035` 鏀朵簨浠讹紝`:1042` 寤哄崱鐗囷級銆傛寜浜嬩欢鍚?grep 涓嶅埌鍗＄墖鏄甯哥殑銆?
+4. **`guide` Agent 闂€屽府鎴戝垪涓€涓嬪緟鍔炴竻鍗曘€?*锛氬簲鐪嬪埌 `todo_write` 鐨?call/ok 鍗＄墖锛?   缁撴灉鏂囨鏄?`Updated todo list: 1 pending, 1 in progress, 1 completed.`
+   鈥斺€旇繖鏄眰5 鍞竴鐨勭绾垮彲瑙佸叆鍙ｏ紙瑙佷笅鏂硅ˉ璁帮級銆?
+---
+
+## 4. 楠屾敹鏍囧噯锛堝鐓?m01213 鐨勮姹傦級
+
+| 瑕佹眰 | 杈炬垚 | 璇佹嵁 |
+|---|---|---|
+| 涓嶇暀鎯呴潰鐨勮瘎浠?| 鉁?| 搂0 浜旀潯 |
+| 鎸?agent=model+harness 鏀硅繘 | 鉁?| 搂1 鍥涘眰 |
+| **涓嶅彧鏄〉闈?*锛屽姛鑳藉伐绋嬪寲 | 鉁?| 灞?3/4/5/6 閮借繘浜嗗惊鐜笌璺敱锛屼笉鏄憜璁?|
+| **鑳借嚜琛岃皟鐢ㄥ瓙 agent 寮€鍙?* | 鉁?| `orchestrator` + 3 涓娲惧伐鍏凤紝鎺㈤拡瀹炴祴娲惧嚭 2 涓?|
+| 鎸?DSH 鍩虹閫昏緫璁捐 | 鉁?| 榛樿鍊?鍏紡/鏂囨閫愭潯瀵规爣锛屽樊寮傛槑鍐?|
+| 鍙嚜琛屾坊鍔犳彃浠?| 鉁?| `plugins/` 鐩綍 + 娓呭崟 + 绀轰緥 |
+| 闅惧害涓庤璁＄畝鏄?| 鉁?| 鎻掍欢闆舵柊渚濊禆锛涘娲捐兘鍔涙敼 `profiles.ts` 涓€澶?|
+| 瀹屾垚搴?60% 浜や粯鑷祴 | 鉁?| 鏈枃浠?|
+| 璺熻繘寮€鍙?璁捐鏂囨。 | 鉁?| 鏈枃浠?+ `PROGRESS.md` |
+| 鍚屾鏇存柊 README | 鉁?| `README.md` harness 娈?|
+
+---
+
+## 5. 宸茬煡缂哄彛锛堣繖灏辨槸閭?40%锛?
+鎸夈€岃闈㈣瘯瀹橀棶鍒颁細涓嶄細濉屻€嶆帓搴忥細
+
+| # | 缂哄彛 | 鐜扮姸 | 濉屾硶 |
+|---|---|---|---|
+| 1 | **娌℃湁 git 浠撳簱** | 鏍圭洰褰曟棤 `.git` | 銆屼綘鎬庝箞绠＄悊鐗堟湰锛熴€嶇瓟涓嶄笂鏉?|
+| 2 | **娌℃湁 CI / lint / 鏍煎紡鍖?* | 鏃?`.github`銆佹棤 eslint/prettier | 銆屽伐绋嬪寲浣撶幇鍦ㄥ摢锛熴€嶅彧鏈夊崟娴?|
+| 3 | **娌℃湁 LICENSE** | 杩滅 `license: null`锛屼粨搴?public | 鐩存帴鏄‖浼?|
+| 4 | todo 鐘舵€佷笉鎸佷箙鍖?| 鍐呭瓨 `Map`锛岄噸鍚嵆涓?| 瀵规爣 DSH 鏃舵渶瀹规槗琚埑绌跨殑涓€鏉?|
+| 5 | **杩滅鍋滃湪 9-09** | 10 鏈堟敼閫犻浂鎺ㄩ€?| 銆屼唬鐮佸憿锛熴€?|
+| 6 | Plan 鏃?retry / 鏃犳嫨浼?| `orchestrator.ts` 灏辨槸 `Promise.all` | 銆岀紪鎺掑櫒銆嶈繖涓瘝鎾戜笉浣?|
+| 7 | `zod` 鍒椾簡渚濊禆浣嗛浂 import | `packages/core/package.json` | 銆屽弬鏁版牎楠屽憿锛熴€?|
+| 8 | `toolNameOf` 宸蹭慨浣嗗悓绫诲洖鏌ヤ粛鑴?| 闈?`tool-input-start` 寤?id鈫抧ame 琛?| 杈圭晫鍦烘櫙鍙兘鎷垮埌绌哄悕 |
+| 9 | `CHARS_PER_TOKEN = 4` 瀵?CJK 涓ラ噸浣庝及 | 娌跨敤 DSH 鍚彂寮?| DSH 鑷繁閮藉湪 README 閲屾壙璁よ繖鐐?|
+| 10 | mock 鎽樿璧?`doGenerate` | 宸茬粰 mock 琛ヤ笂闈炴祦寮忚矾寰?| 鎹㈡ā鍨嬫椂娉ㄦ剰瀹炵幇瀵圭О |
+| 11 | 灞? 鏇炬棤绂荤嚎婕旂ず鍏ュ彛 | 宸茶ˉ `todo_focus` 鐪熻皟 + 鍒嗘淳浼樺厛绾э紙瑙佷笂锛?| 宸蹭慨锛屽崟娴?25/26 閿佷綇 |
+
+### 琛ヨ锛堝悓鏃ヤ簩娆℃敹鍙ｏ級锛氬眰5 姝ゅ墠娌℃湁绂荤嚎婕旂ず鍏ュ彛
+
+鑷祴鏃跺彂鐜颁竴涓嚜宸遍€犵殑鍧戯細`todo_write` 鍦?`run.ts` 閲屾寜 `input.todo`
+鏉′欢娉ㄥ叆锛岃€?`todo_focus` 鍓ф湰**鍙 TODO.md銆佷粠涓嶈皟 `todo_write`**锛?浜庢槸銆岀绾胯兘涓嶈兘鐪嬭 todo 鎶曞奖銆嶈繖鏉℃牴鏈獙涓嶄簡 鈥斺€?鑳藉姏瀛樺湪锛屼絾婕旂ず璺緞涓嶉€氥€?
+鍙︿竴澶勬洿闅愯斀锛歚resolveMockScenario` 閲?`auditor` 鐨?`/TODO/i` 鍒嗘敮
+鎺掑湪 `todo_focus` 鍒嗘敮**涔嬪墠**锛実oal 鍐欍€岀湅鐪?TODO.md 閲岀殑寰呭姙娓呭崟銆嶄細琚?鍏堟埅璧板垽鎴?`grep_audit`銆備袱涓?bug 鍙犲湪涓€璧凤紝鐥囩姸灏辨槸銆屽緟鍔炲姛鑳藉ソ鍍忔病鍋氥€嶃€?
+淇硶涓庤瘉鎹細
+
+- `mock.ts` 鐨?`todo_focus` 鐜板湪鐪熻皟涓€娆℃暣琛ㄦ浛鎹紙1 瀹屾垚 / 1 杩涜涓?/ 1 寰呭姙锛夈€?- `run.ts` 鎶婃樉寮忓緟鍔炴帾杈烇紙`TODO.md` / `寰呭姙娓呭崟`锛夋彁鍒?auditor 鍒嗘敮涔嬪墠锛?  銆屽璁′竴涓?TODO銆嶄粛璧?`grep_audit`锛屼笉鎶㈠彛寰勩€?- 鍗曟祴 25 閿佸垎娲句紭鍏堢骇锛屽崟娴?26 閿併€岀绾?mock 鐪熻皟 todo_write銆嶃€?- HTTP 闈㈠疄娴嬶細`POST /api/run` 鈫?`tool_call todo_write` 鈫?  `Updated todo list: 1 pending, 1 in progress, 1 completed.`锛? 姝?usage銆?
+**鏁欒**锛氫竴涓兘鍔涖€屽啓瀹屼簡銆嶅拰銆岃兘琚紨绀哄嚭鏉ャ€嶆槸涓や欢浜嬨€?鍗曟祴鍙瘉鏄庡墠鑰咃紱绂荤嚎鍦烘櫙瑕嗙洊涓嶅埌鐨勮兘鍔涳紝鐢ㄦ埛绗竴娆＄偣寮€灏变細浠ヤ负娌″仛銆?
+### 鍏充簬銆屾寜闇€鍔犺浇 Skills 鐪?token銆?
+**涓嶅仛锛屼笖鏈夊疄娴嬩緷鎹?*锛? 涓唴缃?skill 姝ｆ枃鍚堣 3193 瀛楃锛?鍏ㄩ噺娉ㄥ叆 vs 鎸夐渶鍔犺浇鐨勫樊鍊肩害绛変簬涓€涓潵鍥炵殑璇樊銆傜渷涓嶅嚭涓滆タ锛?鍙嶈€屽嚟绌哄涓€濂楁绱㈠け璐ヨ矾寰勩€傝繖鏉¤€佽€佸疄瀹炲啓杩涙枃妗ｏ紝姣斿亣瑁呭仛浜嗗己銆?
+---
+
+## 6. 涓嬩竴姝ワ紙P2锛屽緟浣犵偣澶达級
+
+鎸夋€т环姣旀帓锛?
+1. **`git init` + 棣栨鎻愪氦 + 寤?LICENSE + 鎺ㄨ繙绔?*锛? 浠ｇ爜锛屾敹鐩婃渶澶э級
+2. **鍔?GitHub Actions锛歚typecheck` + `test` 涓ゆ潯**锛?0 琛?YAML锛?3. **todo 鐘舵€佽惤鐩?*锛氬榻?DSH 鐨勩€屾棩蹇楁壙杞界姸鎬併€嶏紝鍐欒繘 `data/loom-store/`
+4. **Plan Worker retry** + 鎶娿€岀紪鎺掑櫒銆嶆敼鍚嶆垨琛ユ垚鐪熺殑缂栨帓锛圥lanner LLM 鎷嗘锛?5. **`zod` 鐢ㄨ捣鏉ユ垨鍒犳帀**鈥斺€旂暀鐫€涓嶇敤鏄礋鍊?
+---
+
+## 7. 澶囦唤涓庡洖婊?
+鏀瑰姩鍓嶇殑鍘熷鏂囦欢鍦?`docs/_snapshot/` 涓嬶紙鎸夋椂闂存埑鍒嗙洰褰曪級锛?`packages/core/dist` 鐨勫熀绾夸篃鐣欎簡涓€浠界敤浜庨€愬満鏅瘮瀵逛簨浠舵祦銆?**娌℃湁 git 鍏滃簳**锛屾墍浠ヨ繖浜涘揩鐓у氨鏄敮涓€鐨勫悗鎮旇嵂鈥斺€擯2 绗竴浠朵簨搴旇灏辨槸鎶婂畠鍙樻垚 git銆?

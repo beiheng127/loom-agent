@@ -5,7 +5,8 @@
   "scripts": {
     "dev": "next dev -p 3010",
     "build": "next build",
-    "start": "next start -p 3010"
+    "start": "next start -p 3010",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
     "@loom/core": "*",

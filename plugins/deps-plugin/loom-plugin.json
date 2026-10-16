@@ -1,0 +1,7 @@
+{
+  "name": "deps-plugin",
+  "version": "0.1.0",
+  "description": "依赖体检：对比每个 package 的 package.json 声明与源码里真实 import 的包，报「声明了没用」和「用了没声明」。只读、离线、不装包。",
+  "main": "index.mjs",
+  "author": "loom-agent"
+}

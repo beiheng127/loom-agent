@@ -13,6 +13,8 @@ export const BUILTIN_MODELS: ModelConfig[] = [
     model: "mock-v1",
     blurb: "离线确定性脚本 · 探索 / 读文件",
     temperature: 0,
+    // 小窗口是故意的：mock 上能低成本演示压缩触发（对标 DSH 给小上下文模型配 0.7 的做法）
+    contextWindow: 32_000,
   },
   {
     id: "mock-editor",
@@ -20,6 +22,7 @@ export const BUILTIN_MODELS: ModelConfig[] = [
     model: "mock-editor-v1",
     blurb: "离线脚本 · 强制走 write_file 人工审批",
     temperature: 0,
+    contextWindow: 32_000,
   },
   {
     id: "deepseek-chat",
@@ -29,6 +32,7 @@ export const BUILTIN_MODELS: ModelConfig[] = [
     apiKeyEnv: "DEEPSEEK_API_KEY",
     blurb: "性价比高 · 适合 Worker / 日常改码",
     temperature: 0.3,
+    contextWindow: 64_000,
   },
   {
     id: "openai-mini",
@@ -38,6 +42,7 @@ export const BUILTIN_MODELS: ModelConfig[] = [
     apiKeyEnv: "OPENAI_API_KEY",
     blurb: "轻量 OpenAI · 适合快速拆任务",
     temperature: 0.4,
+    contextWindow: 128_000,
   },
   {
     id: "ollama-local",
@@ -47,6 +52,7 @@ export const BUILTIN_MODELS: ModelConfig[] = [
     apiKeyEnv: "OLLAMA_API_KEY",
     blurb: "本机 Ollama · 无云端 Key 时可真并行",
     temperature: 0.2,
+    contextWindow: 32_000,
   },
 ];
 

@@ -1,0 +1,118 @@
+export type {
+  AgentProfile,
+  ModelAvailability,
+  ModelConfig,
+  MockScenario,
+  Plan,
+  PlanStep,
+  SkillMeta,
+  ToolName,
+  LoopEvent,
+  StepUsage,
+  TokenBudget,
+} from "./types/index.js";
+export {
+  BUILTIN_AGENTS,
+  cloneAgentAsCustom,
+  createAgentProfile,
+  getAgent,
+} from "./agents/profiles.js";
+export {
+  AGENT_TEMPLATES,
+  templateToProfile,
+} from "./agents/templates.js";
+export type { AgentTemplate } from "./agents/templates.js";
+export {
+  defaultAgentStorePath,
+  deleteCustomAgent,
+  listAllAgents,
+  loadCustomAgents,
+  resolveAgent,
+  upsertCustomAgent,
+} from "./agents/store.js";
+export type { StoredAgent } from "./agents/store.js";
+export {
+  defaultSessionStorePath,
+  deleteSession,
+  getSession,
+  listSessions,
+  upsertSession,
+} from "./sessions/store.js";
+export type {
+  StoredSession,
+  StoredSessionMessage,
+} from "./sessions/store.js";
+export {
+  appendPlanRecord,
+  defaultPlanStorePath,
+  listPlans,
+} from "./plans/store.js";
+export type {
+  StoredPlanRecord,
+  StoredPlanStepSummary,
+} from "./plans/store.js";
+export {
+  BUILTIN_MODELS,
+  describeModelAvailability,
+  getModelConfig,
+  isModelKeyConfigured,
+  listAutoSelectableRealModels,
+  listAutoSelectableRealModelsAsync,
+  listModels,
+  listModelsWithAvailability,
+  listModelsWithAvailabilityAsync,
+  preferredComposerModelId,
+  preferredRealModelRoles,
+  probeOllama,
+  providerLabel,
+} from "./models/registry.js";
+export { loadSkillsFromDir, skillsToSystemBlock } from "./skills/loader.js";
+export {
+  defaultCustomSkillsRoot,
+  deleteCustomSkill,
+  formatSkillMarkdown,
+  importSkillMarkdown,
+  listAllSkills,
+  parseSkillMarkdown,
+  upsertCustomSkill,
+} from "./skills/store.js";
+export type { StoredSkill } from "./skills/store.js";
+export { TOOL_CATALOG, toolsForAgent } from "./tools/catalog.js";
+export {
+  listPlannedTools,
+  PLANNED_TOOL_BLURBS,
+  PLANNED_TOOL_NAMES,
+  capabilitySettingsSnapshot,
+  isSearchConfigured,
+} from "./tools/planned.js";
+export type { PlannedToolName, ToolCapabilityStatus } from "./tools/planned.js";
+export {
+  applyApprovedWrite,
+  undoApprovedWrite,
+} from "./tools/fs.js";
+export type { AppliedWriteResult } from "./tools/fs.js";
+export {
+  applyApprovedCmd,
+  isSafeCommand,
+  listSafeCmdPrefixes,
+  DEFAULT_SAFE_CMD_PREFIXES,
+} from "./tools/cmd.js";
+export { assertPublicHttpUrl, webSearchTool, fetchUrlTool } from "./tools/web.js";
+export { resolveMockScenario, runAgentLoop } from "./loop/run.js";
+export { summarizeDiff, unifiedDiff } from "./diff/unified.js";
+export {
+  defaultDemoWorkers,
+  heteroDemoWorkers,
+  runParallelPlan,
+} from "./plan/orchestrator.js";
+export type { PlanWorkerDef, RunPlanInput } from "./plan/orchestrator.js";
+export {
+  DEMO_RECIPES,
+  getDemoRecipe,
+  hasReadyRealModel,
+  resolveDemoRunForEnvironment,
+  tripleDemoWorkers,
+  workersForPlanPreset,
+  workersForPlanPresetAuto,
+} from "./demos/scenarios.js";
+export type { DemoKind, DemoRecipe } from "./demos/scenarios.js";

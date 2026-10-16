@@ -1,6 +1,7 @@
 import type { MockScenario } from "../types/index.js";
 import type { PlanWorkerDef } from "../plan/orchestrator.js";
 import {
+  chainDemoWorkers,
   defaultDemoWorkers,
   heteroDemoWorkers,
 } from "../plan/orchestrator.js";
@@ -217,6 +218,21 @@ export const DEMO_RECIPES: DemoRecipe[] = [
       agentId: "hygienist",
       modelId: "mock-local",
       mockScenario: "cmd_hitl",
+    },
+  },
+  {
+    id: "jobs-tour",
+    step: 2,
+    title: "后台 job：批准后边跑边收",
+    subtitle: "background · job_list / job_output",
+    proves: "长命令不阻塞循环，批准后立刻拿 jobId，输出按游标读",
+    kind: "run",
+    etaSec: 2,
+    run: {
+      goal: "看看后台 job：先提一个待批准的后台命令，批准后再读它的输出",
+      agentId: "hygienist",
+      modelId: "mock-local",
+      mockScenario: "jobs_tour",
     },
   },
   // —— 扩充离线全流程 fixture（仅无云端 Key / 选用 mock 模型时走脚本）——
@@ -539,6 +555,8 @@ export function workersForPlanPresetMock(
       return heteroDemoWorkers(goal);
     case "triple":
       return tripleDemoWorkers(goal);
+    case "chain":
+      return chainDemoWorkers(goal);
     case "homo":
     default:
       return defaultDemoWorkers(goal);
@@ -589,6 +607,30 @@ export function workersForPlanPresetAuto(
           modelId: roles.editor,
           title: "Editor · 提议写入",
           goal: `为「${goal}」起草一份 notes 备忘并走 write_file 审批`,
+        },
+      ];
+    case "chain":
+      // 真模型下的串行流水线：结构 → 审计 → 纪要，后一步吃前一步的结论
+      return [
+        {
+          agentId: "reader",
+          modelId: roles.reader,
+          title: "C1 · 结构",
+          goal: `列出目录与入口，服务：${goal}`,
+        },
+        {
+          agentId: "auditor",
+          modelId: roles.auditor,
+          title: "C2 · 审计（依赖 C1）",
+          goal: `在 C1 结论的基础上查风险痕迹，服务：${goal}`,
+          dependsOn: [0],
+        },
+        {
+          agentId: "editor",
+          modelId: roles.editor,
+          title: "C3 · 纪要（依赖 C2）",
+          goal: `把 C1/C2 的结论写成一份 notes 备忘并走 write_file 审批：${goal}`,
+          dependsOn: [1],
         },
       ];
     case "triple":

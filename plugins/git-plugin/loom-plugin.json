@@ -1,0 +1,7 @@
+{
+  "name": "git-plugin",
+  "version": "0.1.0",
+  "description": "让 Agent 自己看仓库状态：分支/领先落后/改动分布/最近提交。只读，非 git 仓库不报错。",
+  "main": "index.mjs",
+  "author": "loom-agent"
+}

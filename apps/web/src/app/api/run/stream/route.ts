@@ -15,6 +15,7 @@ import {
   defaultSkillsRoot,
   defaultWorkspace,
 } from "@/lib/paths";
+import { loadPluginTools } from "@/lib/harness";
 import fs from "node:fs/promises";
 import path from "node:path";
 
@@ -35,6 +36,12 @@ export async function POST(req: Request) {
     history?: Array<{ role: "user" | "assistant"; content: string }>;
     autoApproveWrites?: boolean;
     contextFiles?: Array<{ path: string; content: string }>;
+    /** harness：会话归属（todo 投影） */
+    sessionId?: string;
+    /** harness：是否加载 plugins/ 下的插件工具，默认 true */
+    plugins?: boolean;
+    /** harness：显式覆盖 token 预算 */
+    budget?: { maxSteps?: number; maxTokens?: number; contextWindow?: number };
   };
 
   const goalBase = (body.goal ?? "").trim();
@@ -123,6 +130,22 @@ export async function POST(req: Request) {
         deletions?: number;
       }> = [];
       const pendingCmds: Array<{ command: string }> = [];
+
+      // 层6：插件工具随请求加载；失败只报警告，不阻断本次运行
+      const pluginLoad = body.plugins === false
+        ? { plugins: [], tools: [], warnings: [] as string[] }
+        : await loadPluginTools((m) => send("plugin_warning", { message: m }));
+      if (pluginLoad.plugins.length) {
+        send("plugins", {
+          plugins: pluginLoad.plugins.map((p) => ({
+            name: p.manifest.name,
+            version: p.manifest.version,
+            tools: p.tools.map((t) => t.name),
+            error: p.error,
+          })),
+        });
+      }
+
       try {
         const answer = await runAgentLoop({
           workspaceRoot,
@@ -135,12 +158,19 @@ export async function POST(req: Request) {
           temperature: body.temperature,
           history: body.history,
           readOnly: body.readOnly,
+          extraTools: pluginLoad.tools,
+          budget: body.budget,
+          todo: body.sessionId
+            ? { sessionId: body.sessionId, allowParallelInProgress: true }
+            : undefined,
           onEvent: (e: LoopEvent) => {
             // 写文件：等循环结束后带 diff 再推一次，避免无 diff 的重复卡片
             if (e.type === "approval_needed" && e.kind !== "cmd") {
               pendingWrites.push({ path: e.path, content: e.content });
               return;
             }
+            // 新增的 harness 事件（subagent_* / compacted / usage）原样透传，
+            // 前端不认就忽略，认了就渲染 —— 不必改协议。
             send(e.type, e);
             if (e.type === "approval_needed" && e.kind === "cmd") {
               pendingCmds.push({ command: e.command ?? e.path });

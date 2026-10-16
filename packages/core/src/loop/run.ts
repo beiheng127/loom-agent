@@ -1,19 +1,139 @@
-import { streamText, type ModelMessage } from "ai";
-import { nanoid } from "nanoid";
+import {
+  jsonSchema,
+  stepCountIs,
+  streamText,
+  tool,
+  type LanguageModel,
+  type ModelMessage,
+  type ToolSet,
+} from "ai";
 import { skillsToSystemBlock } from "../skills/loader.js";
-import { formatToolsForPrompt, toolsForAgent } from "../tools/catalog.js";
+import { toolsForAgent } from "../tools/catalog.js";
 import { resolveLanguageModel } from "../models/registry.js";
+import { createMockLanguageModel, estimateTokens, recordMockResult, BUILTIN_TOOL_NAMES } from "./mock.js";
+import { compactHistory } from "./compact.js";
+import {
+  SubagentRegistry,
+  createSubagentTools,
+  subagentSystemSection,
+} from "../agents/subagents.js";
+import { createTodoStore, createTodoWriteTool, type TodoStore } from "../plan/todo.js";
+import { createFileTodoStore } from "../plan/todo-file.js";
+import { resolveTodoStoreDir, todoStoreIsPersistent } from "../plan/todo-dir.js";
 import type {
   LoopEvent,
   MockScenario,
   RunLoopInput,
+  StepUsage,
+  TokenBudget,
+  ToolDefinition,
   ToolResult,
 } from "../types/index.js";
 
+/** 层2：字符估算的兜底系数，与 DSH 同源 */
+const CHARS_PER_TOKEN = 4;
+
+/**
+ * 层5：todo 的会话级投影。
+ *
+ * 对标 DSH 的「日志承载状态 + 单一所有者」：列表属于某个 agent 会话，
+ * 不搞跨会话共享。轮次开始清空投影、事件日志保留。
+ *
+ * 落盘：事件追加进 `<仓库根>/data/loom-store/todos/<会话>.jsonl`（JSONL，只追加），
+ * 重启后第一次碰到某个会话就回放它的日志 —— 投影与 turn 都能恢复。
+ * 路径由 `LOOM_TODO_DIR` 覆盖；`LOOM_TODO_STORE=memory` 退回纯内存（CI 友好）。
+ */
+let sharedTodoStore: TodoStore | null = null;
+
+function getSharedTodoStore(): TodoStore {
+  if (sharedTodoStore) return sharedTodoStore;
+  sharedTodoStore = todoStoreIsPersistent()
+    ? createFileTodoStore({ dir: resolveTodoStoreDir() })
+    : createTodoStore();
+  return sharedTodoStore;
+}
+
+export function estimateTokensOf(text: string): number {
+  return Math.ceil(text.length / CHARS_PER_TOKEN);
+}
+
+/** 层1-D：把内部 ToolDefinition 包成 AI SDK 原生工具 */
+function toAISDKTools(
+  tools: ToolDefinition[],
+  ctx: {
+    workspaceRoot: string;
+    signal?: AbortSignal;
+    onEvent?: (e: LoopEvent) => void;
+    /** mock 的离线桩：toolCallId -> 结果 */
+    stubs?: Map<string, ToolResult>;
+    /** Ask 模式下把越权调用挡在 SDK 之前 */
+    readOnly: boolean;
+  },
+): ToolSet {
+  const set: ToolSet = {};
+  for (const t of tools) {
+    set[t.name] = tool({
+      description: t.description,
+      inputSchema: jsonSchema<Record<string, unknown>>(
+        t.inputSchema as Parameters<typeof jsonSchema>[0],
+      ),
+      execute: async (input, options): Promise<ToolResult> => {
+        const stub = ctx.stubs?.get(options.toolCallId);
+        if (stub) return stub;
+
+        if (
+          ctx.readOnly &&
+          (t.name === "write_file" || t.name === "run_safe_cmd")
+        ) {
+          const blocked: ToolResult = {
+            ok: false,
+            error: `Ask 模式禁止调用 ${t.name}`,
+          };
+          ctx.onEvent?.({ type: "tool_result", name: t.name, result: blocked });
+          return blocked;
+        }
+
+        const result = await t.execute(input as Record<string, unknown>, {
+          workspaceRoot: ctx.workspaceRoot,
+          signal: options.abortSignal ?? ctx.signal,
+        });
+        return result;
+      },
+    });
+  }
+  return set;
+}
+
+/**
+ * 合并工具来源。优先级：内置 / todo / 委派 > 插件（extraTools）。
+ * 插件工具与前者同名时被丢弃并记一条 warning —— 与插件注册表同一套规则。
+ */
+function mergeTools(
+  primary: ToolDefinition[],
+  extra: ToolDefinition[],
+  warn?: (m: string) => void,
+): ToolDefinition[] {
+  const taken = new Set(primary.map((t) => t.name));
+  const merged = [...primary];
+  for (const t of extra) {
+    if (taken.has(t.name)) {
+      warn?.(`插件工具 ${t.name} 与已有工具同名，已跳过`);
+      continue;
+    }
+    taken.add(t.name);
+    merged.push(t);
+  }
+  return merged;
+}
+
 /**
  * 单 Agent ReAct 循环。
- * - 有真实模型：用 AI SDK streamText + 手工工具协议（token 级 text_delta）
- * - mock：按 scenario 跑确定性脚本（可选分片 text_delta）
+ * 层1：真工具协议 —— 工具以 inputSchema 交给 SDK，循环交给 stopWhen，
+ *       事件从 fullStream 映射；不再把工具塞进 system prompt、不再手写 JSON 协议。
+ * 层1-C：mock 不再另起一条循环，而是换一个照剧本演的 LanguageModel。
+ * 层3：上下文压缩 —— 真值/估算的 token 压力超过阈值就把最旧区间换成摘要。
+ * 层4：子 agent 委派 —— 每个目标一个工具实例，另有 send_message / interrupt_agent / list_agents。
+ * 层5：todo_write —— 整表替换，状态挂在会话投影上。
  */
 export async function runAgentLoop(input: RunLoopInput): Promise<string> {
   const {
@@ -29,160 +149,358 @@ export async function runAgentLoop(input: RunLoopInput): Promise<string> {
     temperature,
     history = [],
     readOnly = false,
+    maxDepth = 1,
+    extraTools = [],
   } = input;
+
+  /*
+   * 委派工具来源优先级：显式入参 > Agent 档案。
+   * 让 Agent 档案自己声明委派能力，UI 就不必替每个 Agent 硬编码一份 —— 加一个
+   * 「能派 3 个子 agent」的 Agent，改 profiles.ts 一处即可。
+   */
+  const subagents = input.subagents ?? agent.subagents ?? [];
+  const effectiveMaxDepth = input.maxDepth ?? agent.maxDepth ?? maxDepth;
+
+  const budget: TokenBudget = {
+    maxSteps: input.budget?.maxSteps ?? maxSteps,
+    maxTokens: input.budget?.maxTokens,
+    // 上下文窗口的权威来源是模型路由（同 DSH：容量属于路由，压缩器只读不猜）
+    contextWindow: input.budget?.contextWindow ?? model.contextWindow,
+    compactThresholdRatio: input.budget?.compactThresholdRatio,
+    compactRetainRatio: input.budget?.compactRetainRatio,
+    headroomTokens: input.budget?.headroomTokens,
+  };
+  const stepLimit = budget.maxSteps ?? maxSteps;
 
   const allowed = readOnly
     ? agent.allowedTools.filter(
         (t) => t !== "write_file" && t !== "run_safe_cmd",
       )
     : agent.allowedTools;
-  const tools = toolsForAgent(allowed);
+  const baseTools = toolsForAgent(allowed);
   const skillBlock = skillsToSystemBlock(
     skills.filter((s) => agent.skillIds.includes(s.id)),
   );
+
+  onEvent?.({ type: "phase", phase: "thinking" });
+
+  // ---- 工具装配 -------------------------------------------------------
+  // 先装工具再解析模型：mock 模型也要看见完整工具集（含委派与插件工具），
+  // 否则离线演示永远演不出「派子 agent」这条路径，能力等于只在真模型下存在。
+  // 委派工具：一个目标一个实例；子 agent 不再往下派（除非显式给了 childSubagents）
+  const registry = new SubagentRegistry();
+  const delegationTools = createSubagentTools(subagents, {
+    // 用函数包一层，避免 run.ts <-> subagents.ts 的模块级循环依赖
+    runLoop: (childInput) => runAgentLoop(childInput),
+    registry,
+    workspaceRoot,
+    parentAllowedTools: allowed,
+    parentModelId: model.id,
+    parentSystemPrompt: agent.systemPrompt,
+    readOnly,
+    depth: 0,
+    maxDepth: effectiveMaxDepth,
+    mockScenario,
+    parentSignal: signal,
+    onEvent,
+    todoSessionPrefix: input.todo?.sessionId,
+    allowParallelTodo: input.todo?.allowParallelInProgress,
+  });
+
+  // todo 工具：只有调用方显式给了会话归属才注入（DSH：非 agent 调用方被拒）
+  const todoStore = getSharedTodoStore();
+  const todoTools: ToolDefinition[] = [];
+  if (input.todo) {
+    if (input.resetTodosAtTurnStart !== false) {
+      todoStore.startTurn(input.todo.sessionId);
+    }
+    todoTools.push(
+      createTodoWriteTool({
+        store: todoStore,
+        allowParallelInProgress: input.todo.allowParallelInProgress,
+        sessionId: input.todo.sessionId,
+      }),
+    );
+  }
+
+  const tools = mergeTools(
+    [...baseTools, ...todoTools, ...delegationTools],
+    extraTools,
+    (m) => onEvent?.({ type: "error", message: m }),
+  );
+
+  // 模型解析：显式注入 > registry > mock
+  let mockRuntime: { stubs: Map<string, ToolResult> } | undefined;
+  let resolved: LanguageModel | null = input.languageModel ?? null;
+  if (!resolved) {
+    resolved = resolveLanguageModel(model);
+  }
+  if (!resolved) {
+    const scenario = resolveMockScenario({
+      explicit: mockScenario,
+      agentId: agent.id,
+      modelId: model.id,
+      goal,
+      // 传合并后的工具名（含委派/插件工具），否则「派子 agent」这类场景不会被选中
+      allowedTools: tools.map((t) => t.name),
+    });
+    const created = createMockLanguageModel({
+      scenario,
+      goal,
+      workspaceRoot,
+      agentId: agent.id,
+      modelId: model.id,
+      tools,
+    });
+    resolved = created.model;
+    mockRuntime = created.runtime;
+  }
+  const languageModel: LanguageModel = resolved;
 
   const system = [
     agent.systemPrompt,
     readOnly ? "\n【Ask 模式】只读，禁止提出写文件或执行本地命令。" : "",
     "",
-    "工作区根目录已沙箱隔离。你只能使用下列工具：",
-    formatToolsForPrompt(tools),
-    "",
-    "当你需要调用工具时，只输出一行 JSON（不要 markdown）：",
-    `{"tool":"<name>","args":{...}}`,
-    "当你已完成任务，输出：",
-    `{"done":true,"answer":"..."}`,
+    "工作区根目录已沙箱隔离。按需调用已提供的工具；写文件与执行命令需要人工批准。",
+    "任务完成后，用自然语言给出结论。",
+    subagentSystemSection(subagents),
     skillBlock ? `\n已加载 Skills：\n${skillBlock}` : "",
   ]
     .filter(Boolean)
     .join("\n");
 
-  onEvent?.({ type: "phase", phase: "thinking" });
-
-  const languageModel = resolveLanguageModel(model);
-  if (!languageModel) {
-    return runMockLoop({
-      workspaceRoot,
-      goal,
-      agentId: agent.id,
-      modelId: model.id,
-      tools,
-      scenario: resolveMockScenario({
-        explicit: mockScenario,
-        agentId: agent.id,
-        modelId: model.id,
-        goal,
-        allowedTools: allowed,
-      }),
-      onEvent,
-      signal,
-    });
-  }
-
-  const messages: ModelMessage[] = [{ role: "system", content: system }];
-  for (const h of history.slice(-12)) {
+  // ---- 消息装配与层3 压缩 --------------------------------------------
+  const messages: ModelMessage[] = [];
+  for (const h of history) {
     messages.push({ role: h.role, content: h.content });
   }
   messages.push({ role: "user", content: goal });
 
-  let finalAnswer = "";
-
-  for (let step = 0; step < maxSteps; step++) {
-    if (signal?.aborted) {
-      onEvent?.({ type: "error", message: "已中止" });
-      break;
-    }
-
-    onEvent?.({ type: "phase", phase: "thinking" });
-    const stream = streamText({
+  if (budget.contextWindow && messages.length > 1) {
+    const before = estimateTokensOf(JSON.stringify(messages));
+    const preMessages = messages.slice(0, -1);
+    const compacted = await compactHistory({
+      messages: preMessages,
       model: languageModel,
-      messages,
-      abortSignal: signal,
-      maxRetries: 1,
-      temperature: temperature ?? model.temperature ?? 0.3,
+      contextWindow: budget.contextWindow,
+      thresholdRatio: budget.compactThresholdRatio,
+      retainRatio: budget.compactRetainRatio,
+      headroomTokens: budget.headroomTokens,
+      signal,
     });
-
-    let text = "";
-    for await (const delta of stream.textStream) {
-      if (signal?.aborted) break;
-      text += delta;
-      onEvent?.({ type: "text_delta", delta });
+    if (compacted.compacted) {
+      messages.length = 0;
+      messages.push(...compacted.messages);
+      messages.push({ role: "user", content: goal });
     }
-
-    onEvent?.({ type: "text", text });
-    messages.push({ role: "assistant", content: text });
-
-    const action = parseAction(text);
-    if (!action) {
-      finalAnswer = text;
-      onEvent?.({ type: "phase", phase: "done" });
-      onEvent?.({ type: "done", text: finalAnswer });
-      break;
-    }
-
-    if ("done" in action && action.done) {
-      finalAnswer = action.answer || text;
-      onEvent?.({ type: "phase", phase: "done" });
-      onEvent?.({ type: "done", text: finalAnswer });
-      break;
-    }
-
-    if (!("tool" in action) || !action.tool) {
-      finalAnswer = text;
-      onEvent?.({ type: "phase", phase: "done" });
-      onEvent?.({ type: "done", text: finalAnswer });
-      break;
-    }
-
-    const toolName = action.tool;
-    const tool = tools.find((t) => t.name === toolName);
-    if (!tool) {
-      messages.push({ role: "user", content: `工具错误: 未知工具 ${toolName}` });
-      continue;
-    }
-
-    const args = (action.args ?? {}) as Record<string, unknown>;
+    const after = estimateTokensOf(JSON.stringify(messages));
     onEvent?.({
-      type: "phase",
-      phase:
-        toolName === "write_file" || toolName === "run_safe_cmd"
-          ? "writing"
-          : "tooling",
-    });
-    onEvent?.({ type: "tool_call", name: toolName, args });
-    const result = await tool.execute(args, { workspaceRoot, signal });
-    onEvent?.({ type: "tool_result", name: toolName, result });
-
-    if (result.requiresApproval && result.pendingWrite) {
-      onEvent?.({
-        type: "approval_needed",
-        kind: "write",
-        path: result.pendingWrite.path,
-        content: result.pendingWrite.content,
-      });
-    }
-    if (result.requiresApproval && result.pendingCmd) {
-      onEvent?.({
-        type: "approval_needed",
-        kind: "cmd",
-        path: result.pendingCmd.command,
-        content: "",
-        command: result.pendingCmd.command,
-      });
-    }
-
-    messages.push({
-      role: "user",
-      content: `工具 ${toolName} 结果：\n${JSON.stringify(result, null, 2)}`,
+      type: "compacted",
+      compactedCount: compacted.compactedCount,
+      releasedTokens: compacted.compacted ? Math.max(0, before - after) : 0,
+      pressureTokens: compacted.pressureTokens,
+      thresholdTokens: compacted.thresholdTokens,
+      retainedCount: compacted.retainedCount,
+      // 未触发是正常路径，不塞 reason 免得 UI 噪音；失败必须带原因
+      reason: compacted.compacted ? undefined : compacted.reason,
     });
   }
 
+  const aborter = new AbortController();
+  const abortFromCaller = (): void => aborter.abort();
+  if (signal) {
+    if (signal.aborted) aborter.abort();
+    else signal.addEventListener("abort", abortFromCaller, { once: true });
+  }
+
+  const usages: StepUsage[] = [];
+  let stepIndex = 0;
+  let totalTokens = 0;
+  let budgetExceeded = false;
+
+  /** toolCallId -> 工具名。tool-input-delta 只带 id，必须回查名字 */
+  const toolNameById = new Map<string, string>();
+
+  const stream = streamText({
+    model: languageModel,
+    system,
+    messages,
+    tools: toAISDKTools(tools, {
+      workspaceRoot,
+      signal: aborter.signal,
+      onEvent,
+      stubs: mockRuntime?.stubs,
+      readOnly,
+    }),
+    stopWhen: stepCountIs(stepLimit),
+    abortSignal: aborter.signal,
+    maxRetries: 1,
+    temperature: temperature ?? model.temperature ?? 0.3,
+  });
+
+  let stepText = "";
+  let lastStepText = "";
+
+  try {
+    for await (const part of stream.fullStream) {
+      switch (part.type) {
+        case "start-step":
+          stepText = "";
+          break;
+
+        case "text-delta":
+          stepText += part.text;
+          onEvent?.({ type: "text_delta", delta: part.text });
+          break;
+
+        case "text-end":
+          if (stepText) {
+            onEvent?.({ type: "text", text: stepText });
+            lastStepText = stepText;
+          }
+          stepText = "";
+          break;
+
+        case "tool-input-start":
+          // 层1 补丁：这里才有工具名，把它记下来给后面的 delta 回查
+          toolNameById.set(part.id, String(part.toolName));
+          break;
+
+        case "tool-input-delta":
+          onEvent?.({
+            type: "tool_input_delta",
+            name: toolNameById.get(part.id) ?? "",
+            delta: part.delta,
+          });
+          break;
+
+        case "tool-call": {
+          const name = String(part.toolName);
+          onEvent?.({
+            type: "phase",
+            phase:
+              name === "write_file" || name === "run_safe_cmd"
+                ? "writing"
+                : "tooling",
+          });
+          onEvent?.({
+            type: "tool_call",
+            name,
+            args: (part.input ?? {}) as Record<string, unknown>,
+          });
+          break;
+        }
+
+        case "tool-result": {
+          const name = String(part.toolName);
+          const result = part.output as ToolResult;
+          recordMockResult(languageModel, result);
+          onEvent?.({ type: "tool_result", name, result });
+          if (result?.requiresApproval && result.pendingWrite) {
+            onEvent?.({
+              type: "approval_needed",
+              kind: "write",
+              path: result.pendingWrite.path,
+              content: result.pendingWrite.content,
+            });
+          }
+          if (result?.requiresApproval && result.pendingCmd) {
+            onEvent?.({
+              type: "approval_needed",
+              kind: "cmd",
+              path: result.pendingCmd.command,
+              content: "",
+              command: result.pendingCmd.command,
+              background: result.pendingCmd.background,
+            });
+          }
+          break;
+        }
+
+        case "tool-error": {
+          onEvent?.({
+            type: "tool_result",
+            name: String(part.toolName),
+            result: { ok: false, error: String(part.error) },
+          });
+          break;
+        }
+
+        case "finish-step": {
+          stepIndex += 1;
+          const usage = part.usage;
+          const measured =
+            typeof usage?.inputTokens === "number" ||
+            typeof usage?.outputTokens === "number";
+          const inputTokens =
+            usage?.inputTokens ?? estimateTokensOf(JSON.stringify(messages));
+          const outputTokens = usage?.outputTokens ?? estimateTokensOf(stepText);
+          totalTokens += usage?.totalTokens ?? inputTokens + outputTokens;
+          const record: StepUsage = {
+            step: stepIndex,
+            inputTokens,
+            outputTokens,
+            totalTokens: usage?.totalTokens ?? inputTokens + outputTokens,
+            cacheReadTokens: usage?.inputTokenDetails?.cacheReadTokens ?? 0,
+            cacheWriteTokens: usage?.inputTokenDetails?.cacheWriteTokens ?? 0,
+            // 本步上下文压力：输入 token（真实值或估算值）
+            pressureTokens: inputTokens,
+            measured: Boolean(measured),
+          };
+          usages.push(record);
+          onEvent?.({ type: "usage", usage: record, budget });
+          if (budget.maxTokens && totalTokens > budget.maxTokens) {
+            budgetExceeded = true;
+            aborter.abort();
+          }
+          break;
+        }
+
+        case "error": {
+          onEvent?.({ type: "error", message: String(part.error) });
+          break;
+        }
+
+        case "abort": {
+          break;
+        }
+
+        default:
+          break;
+      }
+    }
+  } finally {
+    if (signal) signal.removeEventListener("abort", abortFromCaller);
+    // 轮次收尾：保留当前 todo 清单（DSH：turn/end 保留刚完成的清单）
+    if (input.todo) todoStore.endTurn(input.todo.sessionId);
+  }
+
+  if (budgetExceeded) {
+    onEvent?.({
+      type: "error",
+      message: `已超预算：${totalTokens} tokens > ${budget.maxTokens}`,
+    });
+  } else if (aborter.signal.aborted) {
+    onEvent?.({ type: "error", message: "已中止" });
+  }
+
+  let finalAnswer = lastStepText;
   if (!finalAnswer) {
-    finalAnswer = "（达到步数上限，未显式 done）";
-    onEvent?.({ type: "phase", phase: "done" });
-    onEvent?.({ type: "done", text: finalAnswer });
+    try {
+      finalAnswer = await stream.text;
+    } catch {
+      finalAnswer = "";
+    }
+  }
+  if (budgetExceeded) {
+    finalAnswer += `\n（已超 token 预算 ${budget.maxTokens}，提前停止）`;
+  }
+  if (!finalAnswer.trim()) {
+    finalAnswer = "（达到步数上限，未显式给出结论）";
   }
 
+  onEvent?.({ type: "phase", phase: "done" });
+  onEvent?.({ type: "done", text: finalAnswer, usage: usages });
   return finalAnswer;
 }
 
@@ -194,11 +512,29 @@ export function resolveMockScenario(input: {
   allowedTools: string[];
 }): MockScenario {
   if (input.explicit) return input.explicit;
+  // 层4：只有当工具集里真的有非内置工具（委派/插件），且任务明确要求并行/委派时才演
+  const hasForeignTool = input.allowedTools.some(
+    (name) => !BUILTIN_TOOL_NAMES.has(name),
+  );
+  if (
+    hasForeignTool &&
+    /子\s?agent|subagent|并行|委派|分头|同时派/i.test(input.goal)
+  ) {
+    return "delegate_fanout";
+  }
+  // 后台 job：显式说「后台 / job」才演，别把普通「命令」抢过来（那条走 cmd_hitl）
+  if (/后台|job_|job\b|长命令/i.test(input.goal) && input.allowedTools.includes("job_list")) {
+    return "jobs_tour";
+  }
   if (input.modelId === "mock-editor") {
     if (/两个|多文件|changelog/i.test(input.goal)) return "multi_write";
     if (/命令|git status|run_safe/i.test(input.goal)) return "cmd_hitl";
     return "write_hitl";
   }
+  // 待办清单要排在 auditor 的 /TODO/i 之前：那条太宽，「看看 TODO.md 里的待办清单」
+  // 会被它先截走判成 grep_audit，层5 的离线演示就永远进不了 todo_focus。
+  // 这里只认显式待办措辞（TODO.md / 待办清单），「审计一下 TODO」仍旧走 grep_audit。
+  if (/TODO\.md|待办清单/i.test(input.goal)) return "todo_focus";
   if (input.agentId === "auditor" || /审计|TODO|密钥|grep/i.test(input.goal)) {
     if (/env|\.env|password/i.test(input.goal)) return "env_audit";
     return "grep_audit";
@@ -216,7 +552,6 @@ export function resolveMockScenario(input: {
   if (/摸清现状|需求理解|多步任务/i.test(input.goal))
     return "workflow_requirements";
   if (/RULES|规则|\.loom/i.test(input.goal)) return "rules_focus";
-  if (/TODO\.md|待办清单/i.test(input.goal)) return "todo_focus";
   if (/package\.json|依赖/i.test(input.goal)) return "package_focus";
   if (/utils|工具函数/i.test(input.goal)) return "utils_focus";
   if (/API\.md|接口文档/i.test(input.goal)) return "api_docs";
@@ -229,388 +564,5 @@ export function resolveMockScenario(input: {
   return "explore";
 }
 
-type Action =
-  | { done: true; answer?: string }
-  | { tool: string; args?: Record<string, unknown> };
-
-function parseAction(text: string): Action | null {
-  const match = text.match(/\{[\s\S]*\}/);
-  if (!match) return null;
-  try {
-    return JSON.parse(match[0]) as Action;
-  } catch {
-    return null;
-  }
-}
-
-async function runMockLoop(input: {
-  workspaceRoot: string;
-  goal: string;
-  agentId: string;
-  modelId: string;
-  tools: ReturnType<typeof toolsForAgent>;
-  scenario: MockScenario;
-  onEvent?: (e: LoopEvent) => void;
-  signal?: AbortSignal;
-}): Promise<string> {
-  const { workspaceRoot, goal, agentId, modelId, tools, scenario, onEvent, signal } =
-    input;
-  const list = tools.find((t) => t.name === "list_dir");
-  const read = tools.find((t) => t.name === "read_file");
-  const grep = tools.find((t) => t.name === "grep_files");
-  const write = tools.find((t) => t.name === "write_file");
-  const cmd = tools.find((t) => t.name === "run_safe_cmd");
-  const fetchUrl = tools.find((t) => t.name === "fetch_url");
-
-  const sleep = (ms: number): Promise<void> =>
-    new Promise((r) => setTimeout(r, ms));
-
-  const emitText = async (full: string) => {
-    await emitTextDeltas(full, onEvent, sleep);
-    onEvent?.({ type: "text", text: full });
-  };
-
-  await emitText(
-    `[mock:${scenario}] agent=${agentId} model=${modelId}\n目标：${goal}`,
-  );
-
-  if (signal?.aborted) return "已中止";
-
-  const call = async (
-    name: string,
-    tool: (typeof tools)[number] | undefined,
-    args: Record<string, unknown>,
-  ) => {
-    if (!tool) return null;
-    onEvent?.({
-      type: "phase",
-      phase: name === "write_file" || name === "run_safe_cmd" ? "writing" : "tooling",
-    });
-    onEvent?.({ type: "tool_call", name, args });
-    await sleep(40);
-    const result = await tool.execute(args, { workspaceRoot, signal });
-    onEvent?.({ type: "tool_result", name, result });
-    if (result.requiresApproval && result.pendingWrite) {
-      onEvent?.({
-        type: "approval_needed",
-        kind: "write",
-        path: result.pendingWrite.path,
-        content: result.pendingWrite.content,
-      });
-    }
-    if (result.requiresApproval && result.pendingCmd) {
-      onEvent?.({
-        type: "approval_needed",
-        kind: "cmd",
-        path: result.pendingCmd.command,
-        content: "",
-        command: result.pendingCmd.command,
-      });
-    }
-    return result;
-  };
-
-  const finish = async (lines: string[]) => {
-    const answer = [...lines, `trace: ${nanoid(8)}`].join("\n");
-    await emitText(answer);
-    onEvent?.({ type: "done", text: answer });
-    return answer;
-  };
-
-  if (scenario === "list_only") {
-    await call("list_dir", list, { path: "." });
-    return finish(["[mock list_only] 仅列根目录", `目标：${goal}`]);
-  }
-
-  if (scenario === "cmd_hitl") {
-    await call("list_dir", list, { path: "." });
-    if (!cmd) {
-      return finish(["当前 Agent 无 run_safe_cmd，无法演示命令 HITL"]);
-    }
-    await call("run_safe_cmd", cmd, { command: "git status" });
-    return finish([
-      "[mock cmd_hitl] 已提出待批准命令：git status",
-      "请在 HITL 卡片批准或拒绝。",
-    ]);
-  }
-
-  if (scenario === "fetch_url_stub") {
-    // 离线不发起外网：模拟工具结果，避免无 Key 环境依赖网络
-    onEvent?.({ type: "phase", phase: "tooling" });
-    onEvent?.({
-      type: "tool_call",
-      name: "fetch_url",
-      args: { url: "https://example.com" },
-    });
-    await sleep(40);
-    const stub = {
-      ok: true as const,
-      data: {
-        url: "https://example.com",
-        excerpt:
-          "Example Domain — 离线 stub：未发起真实 HTTP（fixture 模式）。",
-        stub: true,
-      },
-    };
-    onEvent?.({
-      type: "tool_result",
-      name: "fetch_url",
-      result: stub,
-    });
-    void fetchUrl;
-    return finish([
-      "[mock fetch_url_stub] 已返回示例摘录（无外网）",
-      "接入真模型后将走真实 fetch_url（含 SSRF 防护）。",
-    ]);
-  }
-
-  if (scenario === "ask_readonly") {
-    await call("list_dir", list, { path: "." });
-    await call("read_file", read, { path: "README.md" });
-    return finish([
-      "[mock ask_readonly] Ask 模式：只读探索完成",
-      "未调用 write_file / run_safe_cmd。",
-      `目标：${goal}`,
-    ]);
-  }
-
-  if (scenario === "rules_focus") {
-    await call("read_file", read, { path: ".loom/RULES.md" });
-    return finish([
-      "[mock rules_focus] 已阅读工作区 RULES",
-      "写文件前应遵守沙箱与审批约定。",
-    ]);
-  }
-
-  if (scenario === "todo_focus") {
-    await call("read_file", read, { path: "TODO.md" });
-    await call("grep_files", grep, { query: "TODO" });
-    return finish(["[mock todo_focus] 已汇总 TODO.md 与 grep TODO 命中"]);
-  }
-
-  if (scenario === "package_focus") {
-    await call("read_file", read, { path: "package.json" });
-    return finish(["[mock package_focus] 已阅读 package.json 依赖与脚本"]);
-  }
-
-  if (scenario === "utils_focus") {
-    await call("read_file", read, { path: "src/utils.ts" });
-    await call("read_file", read, { path: "src/index.ts" });
-    return finish(["[mock utils_focus] 已阅读 src 入口与工具函数"]);
-  }
-
-  if (scenario === "api_docs") {
-    await call("read_file", read, { path: "docs/API.md" });
-    return finish(["[mock api_docs] 已阅读 docs/API.md"]);
-  }
-
-  if (scenario === "env_audit") {
-    await call("grep_files", grep, { query: "sk-" });
-    await call("grep_files", grep, { query: "password" });
-    await call("read_file", read, { path: ".env.example" });
-    return finish([
-      "[mock env_audit] 已扫描疑似密钥痕迹并阅读 .env.example",
-      "假密钥仅作演示，勿提交真凭证。",
-    ]);
-  }
-
-  if (scenario === "multi_grep") {
-    await call("grep_files", grep, { query: "export" });
-    await call("grep_files", grep, { query: "function" });
-    await call("grep_files", grep, { query: "TODO" });
-    return finish(["[mock multi_grep] 多关键词扫描完成"]);
-  }
-
-  if (scenario === "skill_tour") {
-    await call("list_dir", list, { path: "." });
-    await call("read_file", read, { path: "README.md" });
-    await call("list_dir", list, { path: "docs" });
-    await call("list_dir", list, { path: "src" });
-    return finish([
-      "[mock skill_tour] 5 分钟导览",
-      "入口：README → docs/ → src/",
-      `目标：${goal}`,
-    ]);
-  }
-
-  if (
-    scenario === "workflow_requirements" ||
-    scenario === "workflow_design" ||
-    scenario === "workflow_code" ||
-    scenario === "workflow_verify"
-  ) {
-    await call("list_dir", list, { path: "." });
-    await call("read_file", read, { path: "README.md" });
-    if (scenario === "workflow_code" && write) {
-      await call("write_file", write, {
-        path: "notes/workflow-stage-draft.md",
-        content: `# 多步任务草案\n\ngoal: ${goal}\n\n（mock workflow_code · 需批准）\n`,
-      });
-    }
-    if (scenario === "workflow_verify" && cmd) {
-      await call("run_safe_cmd", cmd, { command: "git status" });
-    }
-    const label =
-      scenario === "workflow_requirements"
-        ? "摸清现状"
-        : scenario === "workflow_design"
-          ? "拟定改法"
-          : scenario === "workflow_code"
-            ? "动手改码"
-            : "核对结果";
-    return finish([
-      `[mock ${scenario}] 多步任务「${label}」产出`,
-      `1) 理解：${goal}`,
-      "2) 涉及：README / sample 工作区",
-      "3) 验收：摘要可回写任务并确认下一步",
-      scenario === "workflow_code"
-        ? "4) 已提出 notes/workflow-stage-draft.md 待批准"
-        : "4) 本步未强制写盘",
-    ]);
-  }
-
-  if (scenario === "changelog_write") {
-    if (!write) {
-      return finish(["无 write_file，无法演示 changelog"]);
-    }
-    await call("write_file", write, {
-      path: "notes/CHANGELOG-draft.md",
-      content: `# Changelog\n\n- chore: mock changelog_write\n- note: ${goal}\n`,
-    });
-    return finish([
-      "[mock changelog_write] 已提出 CHANGELOG 草稿，待批准",
-    ]);
-  }
-
-  if (scenario === "write_hitl" || scenario === "multi_write") {
-    await call("list_dir", list, { path: "." });
-    if (!write) {
-      const msg = "当前 Agent 无 write_file，无法演示 HITL 写入";
-      onEvent?.({ type: "error", message: msg });
-      onEvent?.({ type: "done", text: msg });
-      return msg;
-    }
-    const files =
-      scenario === "multi_write"
-        ? [
-            {
-              path: "notes/session-brief.md",
-              content: [
-                "# Session brief",
-                "",
-                `goal: ${goal}`,
-                `at: ${new Date().toISOString()}`,
-                "",
-                "（mock multi_write · 批准后落盘）",
-              ].join("\n"),
-            },
-            {
-              path: "notes/CHANGELOG-draft.md",
-              content: [
-                "# Changelog draft",
-                "",
-                "- feat: Loom mock multi_write demo",
-                `- note: ${goal}`,
-              ].join("\n"),
-            },
-          ]
-        : [
-            {
-              path: "notes/session-brief.md",
-              content: [
-                "# Loom session brief",
-                "",
-                `生成于 mock write_hitl · ${new Date().toISOString()}`,
-                "",
-                `目标：${goal}`,
-                "",
-                "仅在 Studio 批准后才会写入磁盘。",
-              ].join("\n"),
-            },
-          ];
-
-    for (const f of files) {
-      await call("write_file", write, f);
-    }
-    return finish([
-      `[mock ${scenario}] 已提出 ${files.length} 个待批准写入：`,
-      ...files.map((f) => `  · ${f.path}`),
-      "请在「写操作审批」批准或拒绝。",
-    ]);
-  }
-
-  if (scenario === "grep_audit") {
-    await call("list_dir", list, { path: "." });
-    const q1 = await call("grep_files", grep, { query: "TODO" });
-    const q2 = await call("grep_files", grep, { query: "FIXME" });
-    const q3 = await call("grep_files", grep, { query: "sk-" });
-    const q4 = await call("grep_files", grep, { query: "password" });
-    const count = (r: ToolResult | null) => {
-      const hits = (r?.data as { hits?: unknown[] } | undefined)?.hits;
-      return Array.isArray(hits) ? hits.length : 0;
-    };
-    return finish([
-      "[mock grep_audit] 审计摘要",
-      `TODO 命中：${count(q1)}`,
-      `FIXME 命中：${count(q2)}`,
-      `sk- 命中：${count(q3)}`,
-      `password 命中：${count(q4)}`,
-      "建议：假密钥仅存在于 .env.example / 注释，勿提交真凭证。",
-    ]);
-  }
-
-  if (scenario === "docs_focus") {
-    await call("list_dir", list, { path: "docs" });
-    await call("read_file", read, { path: "docs/ARCHITECTURE.md" });
-    await call("read_file", read, { path: "docs/API.md" });
-    return finish([
-      "[mock docs_focus] 已阅读 docs/ARCHITECTURE + API",
-      "要点：Tools → Agents → Orchestrator；写操作 HITL。",
-      `目标：${goal}`,
-    ]);
-  }
-
-  if (list && scenario !== "readme_focus") {
-    await call("list_dir", list, { path: "." });
-  }
-
-  if (read && scenario !== "structure_focus") {
-    await call("read_file", read, { path: "README.md" });
-  }
-
-  if (scenario === "structure_focus" && read) {
-    await call("read_file", read, { path: "src/index.ts" });
-    await call("read_file", read, { path: "package.json" });
-  }
-
-  const focus =
-    scenario === "readme_focus"
-      ? "侧重 README"
-      : scenario === "structure_focus"
-        ? "侧重目录与入口"
-        : "综合探索";
-
-  return finish([
-    `[mock:${scenario} 完成] ${focus}`,
-    `工作区：${workspaceRoot}`,
-    `目标：${goal}`,
-    "确定性工具脚本。有云端 API Key 且选用真模型时不走本路径。",
-  ]);
-}
-
-/** mock UX 与真模型对齐：把整段答案拆成小块 text_delta */
-async function emitTextDeltas(
-  full: string,
-  onEvent: ((e: LoopEvent) => void) | undefined,
-  sleep: (ms: number) => Promise<void>,
-  chunkSize = 24,
-) {
-  if (!onEvent || !full) return;
-  for (let i = 0; i < full.length; i += chunkSize) {
-    const delta = full.slice(i, i + chunkSize);
-    onEvent({ type: "text_delta", delta });
-    await sleep(8);
-  }
-}
-
+export { estimateTokens };
 export type { ToolResult };

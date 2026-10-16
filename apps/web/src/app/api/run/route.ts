@@ -15,6 +15,7 @@ import {
   defaultSkillsRoot,
   defaultWorkspace,
 } from "@/lib/paths";
+import { loadPluginTools } from "@/lib/harness";
 import fs from "node:fs/promises";
 import path from "node:path";
 
@@ -43,6 +44,12 @@ export async function POST(req: Request) {
     readOnly?: boolean;
     history?: Array<{ role: "user" | "assistant"; content: string }>;
     contextFiles?: Array<{ path: string; content: string }>;
+    /** harness：会话归属（todo 投影 / 后续持久化都用它） */
+    sessionId?: string;
+    /** harness：是否加载 plugins/ 下的插件工具，默认 true */
+    plugins?: boolean;
+    /** harness：显式覆盖 token 预算（不传则按模型 contextWindow 自动压缩） */
+    budget?: { maxSteps?: number; maxTokens?: number; contextWindow?: number };
   };
 
   const goalBase = (body.goal ?? "").trim();
@@ -109,6 +116,11 @@ export async function POST(req: Request) {
       ? { ...agent, skillIds: body.skillIds }
       : agent;
 
+  // 层6：加载插件工具（失败隔离，不影响主循环）
+  const pluginLoad = body.plugins === false
+    ? { plugins: [], tools: [], warnings: [] }
+    : await loadPluginTools();
+
   try {
     const answer = await runAgentLoop({
       workspaceRoot,
@@ -121,6 +133,11 @@ export async function POST(req: Request) {
       temperature: body.temperature,
       history: body.history,
       readOnly: body.readOnly,
+      extraTools: pluginLoad.tools,
+      budget: body.budget,
+      todo: body.sessionId
+        ? { sessionId: body.sessionId, allowParallelInProgress: true }
+        : undefined,
       onEvent: (e) => {
         events.push(e);
         if (e.type === "approval_needed") {
@@ -165,6 +182,13 @@ export async function POST(req: Request) {
       skillIds: agentForRun.skillIds,
       model: modelRow.id,
       workspaceRoot,
+      plugins: pluginLoad.plugins.map((p) => ({
+        name: p.manifest.name,
+        version: p.manifest.version,
+        tools: p.tools.map((t) => t.name),
+        error: p.error,
+      })),
+      pluginWarnings: pluginLoad.warnings,
     });
   } catch (e) {
     return Response.json(

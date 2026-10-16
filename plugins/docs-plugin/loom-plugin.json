@@ -1,0 +1,7 @@
+{
+  "name": "docs-plugin",
+  "version": "0.1.0",
+  "description": "文档体检：扫描 Markdown 里的相对链接，报告断链；扫描结果可生成报告文件（走 HITL 审批门禁，插件不直接落盘）。",
+  "main": "index.mjs",
+  "author": "loom-agent"
+}

@@ -8,7 +8,10 @@ data/workspaces/*/notes/
 data/loom-store/agents.json
 data/loom-store/sessions.json
 data/loom-store/plans.json
+data/loom-store/todos/
+data/notes/
 apps/web/.next/
+.next/
 
 .env.*
 !.env.example

@@ -89,5 +89,15 @@ export function capabilitySettingsSnapshot() {
       envExtra: "LOOM_SAFE_CMDS（逗号分隔前缀）",
       timeoutMs: Number(process.env.LOOM_CMD_TIMEOUT_MS ?? 15000),
     },
+    jobs: {
+      live: true,
+      tools: ["job_list", "job_output", "job_kill"],
+      // 与 todo 相反：job 是「句柄」不是「状态」，重启后句柄就没了，
+      // 落盘只会留下一堆永远 running 的假象，所以刻意只在进程内存里。
+      persistent: false,
+      maxOutputChars: 8000,
+      keepFinished: 20,
+      note: "后台跑：run_safe_cmd 传 background:true，批准后拿 jobId，再用 job_output 收输出",
+    },
   };
 }

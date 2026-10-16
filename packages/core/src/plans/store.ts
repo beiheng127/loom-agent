@@ -9,6 +9,8 @@ export type StoredPlanStepSummary = {
   modelId: string;
   resultPreview?: string;
   error?: string;
+  /** 实际跑了几次（含重试） */
+  attempts?: number;
 };
 
 /** 轻量 Plan 运行记录（Board 历史） */
@@ -83,6 +85,7 @@ export function appendPlanRecord(
       modelId: s.modelId,
       resultPreview: s.resultPreview?.slice(0, 400),
       error: s.error,
+      attempts: s.attempts,
     })),
     merged: input.merged?.slice(0, 4000),
     createdAt: input.createdAt ?? Date.now(),

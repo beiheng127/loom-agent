@@ -119,7 +119,7 @@ export const FEATURE_GUIDE: FeatureGuideItem[] = [
       "已接通工具：fetch_url、web_search（需搜索 Key）、run_safe_cmd（白名单 + 审批）。",
     ],
     how: [
-      "agent/.env.local 填 DEEPSEEK_API_KEY → 重启 studio。",
+      "agent/.env 填 DEEPSEEK_API_KEY（复制 .env.example）→ 重启 studio。",
       "搜索：填 TAVILY_API_KEY 或 SERPAPI_API_KEY。",
       "Models 页确认 ready，Run 下拉切换。",
     ],

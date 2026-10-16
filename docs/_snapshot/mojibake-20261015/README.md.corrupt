@@ -1,0 +1,114 @@
+﻿# Loom Agent
+
+[![Node](https://img.shields.io/badge/Node-%E2%89%A520.18-339933?logo=nodedotjs&logoColor=white)](https://nodejs.org)
+[![TypeScript](https://img.shields.io/badge/TypeScript-5.x-3178C6?logo=typescript&logoColor=white)](https://www.typescriptlang.org)
+[![Next.js](https://img.shields.io/badge/Next.js-15-black?logo=nextdotjs&logoColor=white)](https://nextjs.org)
+[![Electron](https://img.shields.io/badge/Electron-Desktop-47848F?logo=electron&logoColor=white)](https://www.electronjs.org)
+[![License](https://img.shields.io/badge/License-MIT-blue)]()
+
+鏈湴浼樺厛鐨?**Coding Agent Studio** 鈥斺€?缁囨満寮?Plan Board锛氬鏅鸿兘浣?脳 澶氭ā鍨?脳 骞惰绾跨▼銆?
+涓€鍙ヨ瘽浠嬬粛锛氬湪涓€涓?IDE 椋庢牸鐨勫伐浣滃彴閲岋紝缁欎换鍔℃淳澶氫釜 AI Worker 骞惰璇绘敼浣犵殑浠ｇ爜搴擄紱鎵€鏈夊啓鏂囦欢鎿嶄綔鍏堝嚭 Diff銆佷綘纭鍚庢墠钀界洏锛岄殢鏃跺彲鎾ゅ洖銆?*娌℃湁 API Key 涔熻兘瀹屾暣璺戦€氱绾?Demo**锛岄厤缃?Key 鍚庢棤缂濆垏鎹㈢湡妯″瀷锛圖eepSeek / OpenAI / 鏈湴 Ollama锛夈€?
+寮曟搸渚ф槸涓€濂?*鐪熸鐨?harness**锛欰I SDK 鍘熺敓 tool calling銆侀€愭楠?token 璁￠噺銆佹寜闃堝€艰嚜鍔ㄥ帇缂╀笂涓嬫枃銆佸瓙 Agent 濮旀淳銆佹彃浠剁儹鍔犺浇銆?
+> 璁捐 [`docs/DESIGN.md`](./docs/DESIGN.md) 路 涓婃墜 [`docs/HANDOFF.md`](./docs/HANDOFF.md) 路 杩涘害 [`docs/PROGRESS.md`](./docs/PROGRESS.md) 路 璺嚎鍥?[`docs/ROADMAP.md`](./docs/ROADMAP.md) 路 **Harness 鏀归€?[`docs/HARNESS-UPGRADE.md`](./docs/HARNESS-UPGRADE.md) 路 [`docs/HARNESS-P1.md`](./docs/HARNESS-P1.md)** 路 绠€鍘嗘潯鐩?[`docs/RESUME.md`](./docs/RESUME.md)
+
+## 鏍稿績鐗规€?
+### 鈿欙笍 Agent Harness锛氭ā鍨嬬湡姝ｄ細銆岀敤宸ュ叿銆?- **鍘熺敓 tool calling**锛氬伐鍏蜂互 JSON Schema 澹版槑锛岃蛋 AI SDK v6 鐨?`streamText` + `stepCountIs`锛屽姝?ReAct 鐢?SDK 椹卞姩锛堜笉鍐嶉潬姝ｅ垯浠庤嚜鐢辨枃鏈噷鎶?JSON锛?- **閫愭楠よ閲?*锛氭瘡涓€姝ヤ笂鎶?`input/output/cacheRead` token锛岃秴棰勭畻鑷姩鐔旀柇
+- **涓婁笅鏂囧帇缂?*锛氬帇鍔涜秴杩?`min(W脳0.8, W鈭扥鈭?5536)` 鏃舵妸鏈€鏃у巻鍙叉崲鎴愪竴鏉℃憳瑕侊紝杩戞湡灏鹃儴閫愬瓧淇濈暀锛?*缁濅笉鍒囧紑 tool-call/tool-result 閰嶅**
+- **瀛?Agent 濮旀淳**锛氫竴涓娲剧洰鏍?= 涓€涓伐鍏峰疄渚嬨€傚唴缃?`orchestrator` 鎸備簡 `subagent_recon` / `subagent_design` / `subagent_verify` 涓変釜锛涘瓙 agent 鐪嬩笉鍒扮埗绾у璇濓紝涓棿姝ラ涓嶅洖娴佺埗绾?- **鎻掍欢绯荤粺**锛歚plugins/<name>/loom-plugin.json` + `index.mjs`锛岄浂鏂颁緷璧栵紝鍗曟彃浠跺け璐ラ殧绂讳笉鎷栧灝涓诲惊鐜?
+### 馃У Plan Board锛氬苟琛?Worker 缁囦换鍔?- 鍚岃川 Plan銆佸紓鏋?Plan锛堜笉鍚岃鑹插垎宸ュ崗浣滐級銆佷笁绾跨▼骞惰銆佽嚜瀹氫箟 Worker 鍧囨敮鎸?- 澶氭浠诲姟鍥涢樁娈垫帹杩涳細**鎽告竻 鈫?鎷熷畾 鈫?鏀圭爜 鈫?鏍稿**锛岀粨鏋滃洖鍐欍€侀€愭纭
+- Plan 涓庝細璇濆叏閮ㄦ湰鍦版寔涔呭寲锛圝SON 瀛樺偍锛夛紝鍘嗗彶鍙煡鍙垹
+
+### 鉁嶏笍 Composer锛欰sk / Agent 鍙屾ā寮?- Ask 妯″紡闂唬鐮侊紝Agent 妯″紡鏀逛唬鐮侊紱`@` 寮曠敤宸ヤ綔鍖烘枃浠?- SSE 娴佸紡杈撳嚭锛?*鍐欐枃浠跺厛 Diff 棰勮锛屽懡浠ゆ墽琛岃蛋鐧藉悕鍗曞鎵癸紙HITL锛?*
+- 濮旀淳銆佸帇缂┿€乼oken 鐢ㄩ噺鍦ㄦ椂闂寸嚎閲岄兘鏈夊崱鐗囷紱鍙樻洿闆嗙粺璁°€佸崟娆℃挙鍥?/ 鍏ㄩ儴鎾ゅ洖
+
+### 馃 Agent 宸ュ巶 + Skills
+- 鍐呯疆 Agent 妯℃澘 + 鑷畾涔?Agent锛堝彲缁戝畾宸ュ叿闆嗕笌 Skill锛夛紱濮旀淳鑳藉姏**鐢?Agent 妗ｆ鑷繁澹版槑**
+- 鍐呯疆 Skills锛歚docs-then-patch`锛堟煡鏂囨。鍐嶆敼鐮侊級銆乣repo-hygiene`锛堜粨搴撳崼鐢燂級銆乣plan-split`銆乣secure-audit` 绛夛紝鏀寔鏂板缓 / 缂栬緫 / 瀵煎叆
+
+### 馃敡 宸ュ叿涓庢ā鍨?- 宸ュ叿锛歚list_dir` / `read_file` / `grep_files` / `write_file` / `fetch_url` / `web_search` / `run_safe_cmd`锛堢櫧鍚嶅崟 + 瓒呮椂鐔旀柇锛? `todo_write`
+- 妯″瀷娉ㄥ唽琛細mock锛堢绾匡級路 DeepSeek 路 OpenAI 路 Ollama锛堝疄鏃舵帰娴嬫湰鍦版ā鍨嬶級锛屾瘡涓ā鍨嬪甫 `contextWindow` 渚涘帇缂╁櫒璇绘暟
+- BYOK锛圔ring Your Own Key锛夛細Key 浠庣幆澧冨彉閲忔敞鍏ワ紙`.env`锛夛紝涓嶅叆搴撱€佷笉涓婁紶
+
+### 馃枼锔?涓夌鎵撳紑鏂瑰紡
+- `npm run demo`锛氱函 CLI锛屾渶蹇劅鍙?Plan 缂栨帓
+- `npm run studio`锛歐eb 鎺у埗鍙帮紙Home 姒傝 / Demo 鐢诲粖 / 鍔熻兘璇存槑 / 鍘嗗彶锛?- `npm run desktop`锛欵lectron 妗岄潰澹筹紝妫€娴嬪埌 Studio 鏈惎鍔ㄤ細鑷姩鎷夎捣
+
+## 鍜?Aether Desk 鐨勫尯鍒?
+鍚屼綔鑰呯殑鍙︿竴涓?Agent 椤圭洰锛屽畾浣嶅埢鎰忛敊寮€锛?
+| | Aether Desk | Loom Agent |
+|--|-------------|------------|
+| 鍦烘櫙 | 鐭ヨ瘑宸ヤ綔鍙?/ RAG / 浼氳瘽鍒跺搧 | 璇绘敼浠ｇ爜搴?/ Skills / Plan Board |
+| UI | 鍥涙爮宸ヤ綔鍙?| **IDE 椋?Studio**锛堟瑙?+ 浠诲姟 / Run / Plan / Agents鈥︼級 |
+| 澹?| 娴忚鍣?| Web + **Electron** |
+| 鐗瑰紓鐐?| Hybrid RAG + 寮曠敤 | **骞惰 Worker 脳 妯″瀷** + Agent 宸ュ巶 + Diff HITL |
+
+## 鏋舵瀯
+
+Monorepo锛坣pm workspaces锛夛紝涓夊眰缁撴瀯锛?
+```
+agent/
+鈹溾攢鈹€ packages/core/        # @loom/core锛欰gent 寮曟搸锛堢函 TS锛屾棤 UI 渚濊禆锛?鈹?  鈹溾攢鈹€ src/loop/         #   Agent 鎵ц寰幆 + 涓婁笅鏂囧帇缂╋紙compact.ts锛?鈹?  鈹溾攢鈹€ src/agents/       #   Agent 宸ュ巶锛歱rofiles / templates / store / **subagents锛堝娲撅級**
+鈹?  鈹溾攢鈹€ src/plan/         #   Plan 骞惰鎵囧嚭 + **todo_write**
+鈹?  鈹溾攢鈹€ src/plugins/      #   **鎻掍欢鍔犺浇鍣紙娓呭崟 + 澶辫触闅旂锛?*
+鈹?  鈹溾攢鈹€ src/tools/        #   宸ュ叿闆嗭細fs / cmd / web / planned锛堝啓瀹℃壒锛?鈹?  鈹溾攢鈹€ src/diff/         #   unified diff 鐢熸垚
+鈹?  鈹溾攢鈹€ src/skills/       #   Skill 鍔犺浇涓庡瓨鍌?鈹?  鈹溾攢鈹€ src/models/       #   妯″瀷娉ㄥ唽琛細mock / deepseek / openai / ollama
+鈹?  鈹溾攢鈹€ test/             #   node:test 鍗曟祴锛?5 鏉★級
+鈹?  鈹斺攢鈹€ skills/           #   鍐呯疆 SKILL.md 瀹氫箟
+鈹溾攢鈹€ apps/web/             # Next.js 15锛歋tudio Web 鐣岄潰锛圫SE + API routes锛?鈹溾攢鈹€ apps/desktop/         # Electron 妗岄潰澹?鈹斺攢鈹€ plugins/              # **鐢ㄦ埛鎻掍欢鐩綍**锛堢ず渚嬶細hello-plugin锛?```
+
+**瀹夊叏璁捐**锛氬啓鏂囦欢姘歌繙鍏堜骇鍑?Diff 杩涘叆寰呭鎵圭姸鎬侊紝鐢ㄦ埛纭鎵嶈惤鐩橈紱鍛戒护鎵ц璧扮櫧鍚嶅崟鍓嶇紑鏍￠獙 + 瓒呮椂鐔旀柇锛堝嵄闄╁瓧绗﹁〃鍚?`| ; & \` $( > <` 涓庢崲琛岋級锛汚PI Key 浠庣幆澧冨彉閲忔敞鍏ャ€?
+## 蹇€熷紑濮?
+```bash
+git clone https://github.com/beiheng127/loom-agent.git
+cd loom-agent
+npm install            # 闇€瑕?Node 鈮?20.18
+npm run studio         # 缂栬瘧 core + 鍚姩 Web 鈫?http://localhost:3010
+```
+
+鎵撳紑鍚庨粯璁よ繘鍏?**Home 路 姒傝**锛屽彲鍒囥€屼笂鎵?Demo / 鍔熻兘璇存槑 / 鍘嗗彶銆嶃€?*鏃?API Key 鍗冲彲璺戠绾?Demo**锛堝唴缃?mock 鍦烘櫙锛屽叏娴佺▼鍙窇閫氾級銆?
+閰嶇疆鐪熸ā鍨嬶紙鍙€夛級锛氬鍒?`.env.example` 涓?`.env`锛屽～鍏?`DEEPSEEK_API_KEY` 鎴?`OPENAI_API_KEY`锛涙湰鏈鸿浜?Ollama 鐨勮瘽 Models 闈㈡澘浼氬疄鏃舵帰娴嬪埌銆?
+妗岄潰澹筹紙鍙﹀紑缁堢锛岄渶 Studio 宸茬洃鍚?3010锛夛細
+
+```bash
+npm run desktop
+```
+
+## 闂ㄧ
+
+```bash
+npm run typecheck   # core + web 绫诲瀷妫€鏌?npm test            # node:test锛?5 鏉＄敤渚?node packages/core/dist/demo.js   # 绂荤嚎绔埌绔?Demo锛堟棤闇€浠讳綍 Key锛?cd apps/web && npx next build     # Web 鏋勫缓锛?0 鏉¤矾鐢?npm run studio                    # 璧?:3010 鍚庯紝鍙﹀紑缁堢璺?HTTP 绔埌绔帰閽堬細
+node scripts/probes/http.mjs           # 12 椤规柇瑷€锛氭彃浠?/ 濮旀淳 / 璁￠噺 鐪熺殑浠?API 鏆撮湶
+```
+
+## 鍐欎竴涓彃浠?
+闆舵柊渚濊禆锛氬缓鐩綍銆佸啓娓呭崟銆佸鍑轰竴涓?`tools` 鏁扮粍銆?
+```text
+plugins/my-plugin/
+鈹溾攢鈹€ loom-plugin.json
+鈹斺攢鈹€ index.mjs
+```
+
+```json
+{ "name": "my-plugin", "version": "0.1.0", "main": "index.mjs" }
+```
+
+```js
+export const tools = [
+  {
+    name: "my_tool",
+    description: "鍋氫竴浠跺皬浜?,
+    inputSchema: { type: "object", properties: { q: { type: "string" } }, required: ["q"] },
+    async execute(args, ctx) {
+      return { ok: true, data: { echo: args.q, root: ctx.workspaceRoot } };
+    },
+  },
+];
+```
+
+宸ュ叿鍚嶉』鍖归厤 `^[a-z][a-z0-9_]*$`锛屼笌鍐呯疆鍚屽悕浼氳涓㈠純骞惰涓€鏉?warning锛?鎻掍欢鎶涢敊鍙細璁╁畠鑷繁鏍囨垚 `error`锛?*涓嶄細鎷栧灝 Agent 寰幆**銆?
+## 鎶€鏈爤
+
+TypeScript 路 Node.js 鈮?20 路 Next.js 15 (App Router, SSE) 路 React 路 Electron 路 npm workspaces 路 Vercel AI SDK v6 路 node:test
+
+## 涓嬩竴姝?
+瑙?[`docs/HARNESS-P1.md`](./docs/HARNESS-P1.md) 搂6 涓?[`docs/PROGRESS.md`](./docs/PROGRESS.md)锛歚git init` + LICENSE + CI銆乼odo 鐘舵€佽惤鐩樸€丳lan Worker retry銆?

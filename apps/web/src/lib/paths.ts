@@ -58,3 +58,8 @@ export function defaultSessionStore() {
 export function defaultPlanStore() {
   return path.join(agentRepoRoot(), "data/loom-store/plans.json");
 }
+
+/** 层6：插件目录（loom-plugin.json + index.mjs），与内置工具同一套加载/校验规则 */
+export function defaultPluginsRoot() {
+  return path.join(agentRepoRoot(), "plugins");
+}

@@ -58,7 +58,9 @@ export function WorkflowView({
       window.removeEventListener(WORKFLOW_EVENT, onEvt);
       window.removeEventListener("storage", onEvt);
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- 只在挂载时恢复 stale
+    // 依赖数组刻意只留 [reload]（reload 是 useCallback 稳定的）：
+    // 这个 effect 只在挂载时订阅一次事件。不挂 eslint-disable 指令 ——
+    // 仓库没有注册 react-hooks 插件，那行注释自身会报 “rule not found”。
   }, [reload]);
 
   // Run 结束后刷新（结果已由 LoomShell 写入 localStorage）

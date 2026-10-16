@@ -1,33 +1,36 @@
 "use client";
 
 import { DiffBlock } from "@/components/DiffBlock";
+import { MarkdownPreview } from "@/components/MarkdownPreview";
 
 export type ThreadItem =
   | { kind: "user"; id: string; text: string; at: number }
   | { kind: "assistant"; id: string; text: string; at: number; streaming?: boolean }
   | {
-      kind: "tool";
-      id: string;
-      name: string;
-      args?: Record<string, unknown>;
-      ok?: boolean;
-      preview?: string;
-      statusHint?: "not_configured" | "call" | "ok" | "error";
-      at: number;
-    }
+    kind: "tool";
+    id: string;
+    name: string;
+    args?: Record<string, unknown>;
+    ok?: boolean;
+    preview?: string;
+    statusHint?: "not_configured" | "call" | "ok" | "error";
+    at: number;
+  }
   | { kind: "phase"; id: string; phase: string; at: number }
   | {
-      kind: "hitl";
-      id: string;
-      hitlKind?: "write" | "cmd";
-      path: string;
-      content: string;
-      command?: string;
-      diff?: string;
-      additions?: number;
-      deletions?: number;
-      at: number;
-    };
+    kind: "hitl";
+    id: string;
+    hitlKind?: "write" | "cmd";
+    path: string;
+    content: string;
+    command?: string;
+    /** 后台命令：批准后不起在请求里等，而是拿 jobId */
+    background?: boolean;
+    diff?: string;
+    additions?: number;
+    deletions?: number;
+    at: number;
+  };
 
 export function ComposerThread({
   items,
@@ -42,7 +45,7 @@ export function ComposerThread({
     content: string;
   }) => void;
   onReject?: (w: { path: string; content: string }) => void;
-  onApproveCmd?: (c: { command: string }) => void;
+  onApproveCmd?: (c: { command: string; background?: boolean }) => void;
   onRejectCmd?: (c: { command: string }) => void;
 }) {
   if (items.length === 0) {
@@ -75,7 +78,11 @@ export function ComposerThread({
                 <div className="bubble-role">
                   Agent{it.streaming ? " · streaming" : ""}
                 </div>
-                <div className="bubble-body mono">{it.text || "…"}</div>
+                {it.text ? (
+                  <MarkdownPreview source={it.text} className="bubble-md" />
+                ) : (
+                  <div className="bubble-body muted">…</div>
+                )}
               </div>
             );
           case "phase":
@@ -94,7 +101,9 @@ export function ComposerThread({
                   <span className="mono">
                     {isCmd ? `cmd · ${command}` : `write · ${it.path}`}
                   </span>
-                  <span className="badge pending">needs approval</span>
+                  <span className="badge pending">
+                    {isCmd && it.background ? "needs approval · 后台" : "needs approval"}
+                  </span>
                 </div>
                 {isCmd ? (
                   <pre className="tool-preview">{command}</pre>
@@ -119,7 +128,10 @@ export function ComposerThread({
                     className="btn ok sm"
                     onClick={() =>
                       isCmd
-                        ? onApproveCmd?.({ command })
+                        ? onApproveCmd?.({
+                            command,
+                            background: it.background,
+                          })
                         : onApprove?.({ path: it.path, content: it.content })
                     }
                   >
