@@ -2,6 +2,8 @@ import {
   appendPlanRecord,
   BUILTIN_AGENTS,
   describePlannerResult,
+  makePlannerJudge,
+  makePlannerReplanner,
   planWorkers,
   PlanDependencyError,
   preferredComposerModelId,
@@ -38,11 +40,24 @@ export async function POST(req: Request) {
     planner?: boolean;
     /** 规划用的模型 id；不给就用当前首选真模型 */
     plannerModelId?: string;
+    /**
+     * 同批最多同时跑几个（默认 0 = 不限）。一批 8 个全开会把 API 打爆。
+     */
+    maxConcurrency?: number;
+    /**
+     * 失败重规划：某步重试也挂了，让模型重排剩下没跑的步（要真模型，默认 false）。
+     */
+    replan?: boolean;
+    /** best-of-N：每步跑几个候选再让模型挑（1 = 不择优，默认 1） */
+    bestOf?: number;
   };
   const goal = (body.goal ?? "").trim() || "探索工作区并总结";
   const workspaceRoot = path.resolve(body.workspace || defaultWorkspace());
   const steps: PlanStep[] = [];
   const preset = body.preset ?? "homo";
+  /** 真模型 id（拆步 / 择优 / 重规划共用）；没有真模型时这些开关一律不开 */
+  const modelId =
+    body.plannerModelId?.trim() || preferredComposerModelId() || undefined;
 
   let workers: PlanWorkerDef[];
   if (preset === "custom" && Array.isArray(body.workers) && body.workers.length) {
@@ -65,7 +80,6 @@ export async function POST(req: Request) {
     notes?: string[];
   } | null = null;
   if (body.planner === true && preset !== "custom" && !(Array.isArray(body.workers) && body.workers.length)) {
-    const modelId = body.plannerModelId?.trim() || preferredComposerModelId() || undefined;
     const planned = await planWorkers({
       goal,
       modelId,
@@ -97,6 +111,12 @@ export async function POST(req: Request) {
   let merged: string;
   let pendingWrites: Array<{ path: string; content: string; stepId: string }>;
   let batches: PlanBatch[];
+  /** 重规划过程的说明（成功换了几步 / 为什么没换），回给 UI 看 */
+  const replanNotes: string[] = [];
+  const bestOf =
+    typeof body.bestOf === "number" && Number.isFinite(body.bestOf)
+      ? Math.max(1, Math.min(4, Math.trunc(body.bestOf)))
+      : 1;
   try {
     const out = await runParallelPlan({
       workspaceRoot,
@@ -104,11 +124,31 @@ export async function POST(req: Request) {
       skillsRoot: defaultSkillsRoot(),
       customSkillsRoot: defaultCustomSkillsRoot(),
       agentStorePath: defaultAgentStore(),
-      workers,
+      workers: bestOf > 1 ? workers.map((w) => ({ ...w, bestOf })) : workers,
       maxRetries:
         typeof body.maxRetries === "number" && Number.isFinite(body.maxRetries)
           ? Math.max(0, Math.min(5, Math.trunc(body.maxRetries)))
           : 1,
+      maxConcurrency:
+        typeof body.maxConcurrency === "number" &&
+        Number.isFinite(body.maxConcurrency)
+          ? Math.max(0, Math.min(8, Math.trunc(body.maxConcurrency)))
+          : 0,
+      // 重规划要烧 token：只有显式要、且确实有真模型时才接上
+      replan:
+        body.replan === true && modelId
+          ? makePlannerReplanner({
+              modelId,
+              maxWorkers: Math.max(4, workers.length),
+              allowedAgentIds: BUILTIN_AGENTS.map((a) => a.id),
+              signal: req.signal,
+              onNote: (n) => replanNotes.push(n),
+            })
+          : undefined,
+      judge:
+        bestOf > 1 && modelId
+          ? makePlannerJudge({ modelId, signal: req.signal })
+          : undefined,
       signal: req.signal,
       onStep: (s) => {
         const idx = steps.findIndex((x) => x.id === s.id);
@@ -156,6 +196,11 @@ export async function POST(req: Request) {
     workers,
     batches,
     planner: plannerNote,
+    replan:
+      body.replan === true
+        ? { enabled: Boolean(modelId), notes: replanNotes }
+        : undefined,
+    bestOf: bestOf > 1 ? bestOf : undefined,
     record,
   });
 }

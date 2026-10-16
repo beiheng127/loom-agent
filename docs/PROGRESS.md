@@ -156,6 +156,33 @@ HTTP 探针 12 → **17** 项断言，全绿；`typecheck` / `next build`（20 �
 
 ---
 
+## 本轮增量 · 择优 / 重规划 / 并发上限（2026-10-16 夜）
+
+上一节末尾还在写「无择优、无重规划、同批全开」。这轮把这三件补上，Plan 才算真的编排：
+
+| 能力 | 实现 | 证据 |
+|---|---|---|
+| 同批并发上限 | `mapWithConcurrency(items, limit, fn)`：`limit <= 0` 退化成 `Promise.all`，否则跑完一个补一个 | 单测：limit=2 时峰值 `inFlight=2`、结果顺序与输入一致；limit=0 → 峰值 3 |
+| best-of-N 择优 | step 的 `bestOf > 1` → 并行跑 N 个候选（受同一并发闸门约束），再由 `judge` 返回下标挑一份 | 单测：3 个候选都跑了、选中的是最长的那份、`candidates` 全留着给 UI；裁判越界 → 退回第 0 个并在 `error` 写明；裁判抛错 → 不扔结果，标「择优失败」 |
+| **没裁判不算择优** | 只有真给了 judge 才写 `selectedCandidate` | 这条是修自己的假动作：原来没接裁判也会写，会把「跑了 3 个候选」读成「择优成功」 |
+| 失败重规划（Replanner） | `replan` 回调：某步重试也失败 → 让它重排**剩下没跑的步**，就地改写 workers 数组（下标一一对应），换完图重算剩余层级接着调度 | 单测：链 A→B→C 炸在 A，重排后 B 变成新目标且跑成功；回调抛错 / 返回 null → 剩下步照旧 skipped，绝不把编排带崩 |
+| 真模型工厂 | `makePlannerJudge({modelId})` / `makePlannerReplanner({modelId})`：judge 温度 0、只输出 `{"index":n}`；replanner 输出与 `/api/plan?planner` 同一份 `normalizePlannerDrafts` 校验 | `scripts/probes/replan-live.mjs` |
+
+**踩到并修掉的一个真 bug**（真模型端到端才暴露出来的）：重规划出来的新步会**沿用失败那一步的模型**。
+探针里 W1 用没配 Key 的 `openai-mini` 挂了，模型把 W2 重排成「写仓库总结」——但 W2 继承了 `openai-mini`，于是又挂一次。
+默认值改成「用重规划自己这个（刚跑通的）模型，都没有才退回 `mock-local`」；模型若照抄了失败步的模型，就地换掉。
+钉住它的单测 `planner.24`，修复前后探针输出对比（同一份 `scripts/probes/replan-live.mjs`）：
+
+| | 修复前 | 修复后 |
+|---|---|---|
+| W1 | `failed` · 缺少 `OPENAI_API_KEY` | `failed` · 同上（故意的） |
+| W2 | `failed` · 同一个错（继承了 `openai-mini`） | `done` · `deepseek-chat`，真读 README 写出总结 |
+
+**数字**：单测 128 → **158**（新增 `plan-orchestrate.test.mjs` 里 26 条 + `plan-planner.test.mjs` 里 4 条）；
+HTTP 探针 33 → **35** 项断言全绿；`typecheck`（core + web）EXIT=0。
+
+---
+
 ## 本轮增量 · 后台 job 通道（2026-10-16 晚）
 
 `run_safe_cmd` 以前只能**阻塞**跑：一条 `git log` 慢起来就占着整轮循环等超时。
@@ -197,16 +224,16 @@ HTTP 探针 12 → **17** 项断言，全绿；`typecheck` / `next build`（20 �
 
 | 模块 | 完成度 | 说明 |
 |------|--------|------|
-| Agent Harness（协议/计量/压缩/委派/插件/编排/todo 落盘/后台 job） | ✅ ~88% | 六件内脏齐了 + 4 个真插件 + todo 事件落盘（跨进程回放已验证）+ 模型动态拆步 + 后台 job 通道（批准后起 job，模型能边跑边读）；剩无 best-of-N 择优 / 无失败重规划 |
+| Agent Harness（协议/计量/压缩/委派/插件/编排/todo 落盘/后台 job） | ✅ ~92% | 六件内脏齐了 + 4 个真插件 + todo 事件落盘（跨进程回放已验证）+ 模型动态拆步 + 后台 job 通道；编排三件套（并发上限 / best-of-N 择优 / 失败重规划）已落地并经真模型验证 |
 | Home / 上手 | ✅ ~95% | 概览落地页、Demo、功能说明、历史 CRUD |
 | 多步任务 | ✅ ~90% | 四步流水线、回写、确认 |
 | Composer Run | ✅ ~90% | Ask/Agent、Sessions、@文件、SSE、token 用量 |
 | Diff / 命令 HITL | ✅ ~95% | 统计、单次/全部撤回 |
-| Plan Board | ✅ ~95% | 依赖分批 + 重试 + 上游下沉 + `chain` 串行预设 + 模型动态拆步，依赖错给 400；**无 best-of-N 择优、无失败重规划** |
+| Plan Board | ✅ ~98% | 依赖分批 + 重试 + 上游下沉 + `chain` 串行预设 + 模型动态拆步 + 并发上限 + best-of-N 择优 + 失败重规划，依赖错给 400；剩 裁判缓存 / 重规划成本预算 |
 | Agents / Skills | ✅ ~92% | 含委派能力声明（`orchestrator`） |
 | Models / 联网 | ✅ ~92% | 每个模型带 `contextWindow`；`web_search` live（需 Key） |
 | Desktop | ✅ ~85% | 检测 :3010，否则自动 `studio` |
-| **工程门禁** | ❌ ~10% | 有 128 条单测；**无 git / CI / lint / LICENSE** |
+| **工程门禁** | ✅ ~60% | **已有 git 仓库 + LICENSE(MIT) + GitHub Actions（typecheck + test）**，158 条单测；仍缺 lint 门禁 |
 
 ---
 
@@ -214,13 +241,13 @@ HTTP 探针 12 → **17** 项断言，全绿；`typecheck` / `next build`（20 �
 
 | # | 项 | 状态 | 备注 |
 |---|----|------|------|
-| 1 | `git init` + LICENSE + 推远端 | 待做 | 零代码，收益最大；远端停在 2026-09-09 |
-| 2 | GitHub Actions：typecheck + test | 待做 | 约 30 行 YAML |
+| 1 | `git init` + LICENSE + 推远端 | ✅ 2026-10-16 | 独立仓库接回原 7 次提交，两次提交已推 `beiheng127/loom-agent`；MIT LICENSE + CI（typecheck + test）；另加 `.gitattributes` 钉 LF |
+| 2 | GitHub Actions：typecheck + test | ✅ 2026-10-16 | `.github/workflows/ci.yml`，约 30 行；`npm ci` + typecheck + 158 条单测 |
 | 3 | todo 状态落盘 | ✅ 2026-10-16 | 事件追加 `data/loom-store/todos/*.jsonl`（懒加载/只追加/写失败降级）；11 条单测 + 两进程回放探针 |
-| 4 | Plan Worker 失败重试 + 真编排 | ✅ 2026-10-16 | 依赖分层 + 重试 + 上游摘要下沉 + `chain` 预设；剩 择优 / 失败重规划 / 并发上限 |
+| 4 | Plan Worker 失败重试 + 真编排 | ✅ 2026-10-16 | 依赖分层 + 重试 + 上游摘要下沉 + `chain` 预设 + 并发上限 + best-of-N 择优 + 失败重规划（真模型端到端验过）；剩 裁判缓存 / 重规划成本预算 |
 | 5 | `zod` 用起来或删掉 | ✅ 2026-10-16 | 已删：core 里 0 处 import，删掉声明 + 重生成 lock；`ai` 的 peer 仍会把它装进 `node_modules`（那是 `ai` 的事） |
 | 6 | 批量重命名预览 + 批准 | 待做 | Sprint B 剩余 |
-| 7 | 根包补 `ai` 声明 | 待做 | `scripts/probes/compact.mjs:10` 在用 `ai/test`，现在靠 npm 提升；等本人点头 |
+| 7 | 根包补 `ai` 声明 | ✅ 2026-10-16 | `scripts/probes/compact.mjs` 在用 `ai/test`，已显式声明不再靠 npm 提升 |
 | 8 | 后台 job（`job_list` / `job_output` / `job_kill`） | ✅ 2026-10-16 | 批准后起 job 拿句柄，输出按游标只给新增；单例必须挂 `globalThis`（Next 每条 route 各编译一份模块）；14 条单测 + 库级探针 11 条 + HTTP 8 条 |
 
 ---
@@ -230,7 +257,7 @@ HTTP 探针 12 → **17** 项断言，全绿；`typecheck` / `next build`（20 �
 ```bash
 cd agent
 npm run typecheck     # EXIT=0（core + web）
-npm test              # 128 pass / 0 fail（含 todo 落盘 11 条、模型拆步 14 条、后台 job 14 条、离线 job 剧本 2 条）
+npm test              # 158 pass / 0 fail（含 todo 落盘 11 条、模型拆步 14 条、后台 job 14 条、编排三件套 30 条）
 node packages/core/dist/demo.js      # 离线 Demo，无需 Key
 node scripts/probes/harness.mjs           # 委派 + 计量端到端（库级）
 node scripts/probes/plugins.mjs           # 4 个自带插件在真实仓库上跑出具体数字（库级，不起服务）
@@ -238,9 +265,10 @@ node scripts/probes/todo-persist.mjs write   # todo 事件落盘（进程 A）
 node scripts/probes/todo-persist.mjs replay  # 换一个空内存进程只靠文件恢复（进程 B）
 node scripts/probes/jobs.mjs                 # 后台 job：立刻返回 / 游标读输出 / kill 真收掉 / 白名单拦得住（库级，不用起服务）
 npm run studio                       # :3010
-node scripts/probes/http.mjs              # HTTP 端到端，33 项断言（含 chain 3 批、循环依赖 400、todo 落盘与回放、模型拆步与回落、后台 job 8 条，另开终端）
+node scripts/probes/http.mjs              # HTTP 端到端，35 项断言（含 chain 3 批、循环依赖 400、todo 落盘与回放、模型拆步与回落、后台 job 8 条，另开终端）
 node scripts/probes/plugin-live.mjs       # 真模型端到端：模型自己调插件（需 DEEPSEEK_API_KEY，没 Key 自动跳过）
 node scripts/probes/planner-live.mjs      # 真模型端到端：一句总目标 → 模型拆出带依赖的清单 → 分批跑完（需 Key，没 Key 自动跳过）
+node scripts/probes/replan-live.mjs       # 真模型端到端：故意让第 1 步挂掉 → 重规划换模型重排第 2 步（需 Key）
 node scripts/probes/plugin-hot.mjs         # 热加载是真的吗：改插件源码 → 不重启 → /api/meta 立马变（需先起 :3010）
 node scripts/probes/audit-mock-claims.mjs    # 假动作审计：mock 有没有「说了没做」
 node scripts/probes/check-docs-encoding.mjs  # 文档编码自检（BOM / U+FFFD / mojibake）
@@ -278,4 +306,12 @@ UI 自测九点：
    第一遍只出一张待批准的 cmd 卡片，右侧 Jobs 是空的（提案不等于执行）；批准后 job 才出现，
    再点一次同一张卡片问同一句话，第二遍就走 `job_list` + `job_output` 把输出读回来。
 
+10. Plan 面板新加的三个控件（都在「自定义 Worker」那一块）：
 
+    - 某 Worker 的「候选数」填 3 + 选一个裁判模型 → 卡片小字出现
+      `择优：第 k / 3 份候选`；**没选裁判就写 `未接裁判`**，
+      绝不把「跑了 3 份」说成「择优成功」。
+    - 「同批并发上限」填 1 → 同批两张卡变成一前一后跑完（填 0 = 不限）。
+    - 勾「失败后重规划」+ 选规划模型 → 第一个 Worker 用不可用的模型挂掉后，
+      剩下那步会被重排成新目标**并换掉那个失败的模型**接着跑。
+      真模型下的实际输出见 `scripts/probes/replan-live.out.txt`。

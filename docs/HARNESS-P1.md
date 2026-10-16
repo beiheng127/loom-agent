@@ -23,7 +23,15 @@
    > 都补上了（`runPlanScheduler` + `topoBatches`，依赖错在跑之前就报），`chain` 预设是真正的串行流水线；
    > 再往后 `planner.ts` 把**模型拆步**也接进了自动链路（`POST /api/plan { planner: true }` → 一次
    > `generateText` 出带 `deps` 的 Worker 清单，解析不了就回落预设；真模型实测拆出「2 批 → 1」的链）。
-   > **仍然没有** best-of-N 择优与失败重规划（Replanner）——所以「自己长链路」补上了，「长歪了能改」还没补。
+   > **仍然没有** best-of-N 择优与失败重规划（Replanner）——所以「自己长链路」补上了，    > **第三轮补记（2026-10-16 夜）：择优、重规划、并发上限三件都落地了。**
+    > - `bestOf > 1` → 并行跑 N 份候选（受同一个并发闸门约束）再交 `judge` 挑一份；
+    >   没接裁判时 step 上写「未接裁判」，**不把「跑了 3 份」记成「择优成功」**（这条是修自己的假动作）。
+    > - `replan` 回调：重试也失败的步，让规划模型重排**剩下没跑的步**，就地改图接着调度。
+    > - `maxConcurrency` 限制同批同时跑几个（默认 2，`<=0` 不限）。
+    > 真模型端到端（`scripts/probes/replan-live.mjs`）还揪出一个真 bug：重排出来的新步会**沿用失败那一步
+    > 的模型**（W1 用没配 Key 的 `openai-mini` 挂了 → W2 继承它也挂）。默认值改成「用重规划自己这个
+    > 刚跑通的模型」，模型照抄失败模型时就地换掉，单测 `planner.24` 钉住。
+    > 「长歪了能改」现在的边界：只重排**没跑的**步，且每步最多触发一次——它不是常驻 planner。
 3. **上下文永远不会压缩。** `run.ts` 原来写死 `history.slice(-12)`，
    既不计量也不压缩——多轮长任务必然爆上下文，而代码里连「爆了」这件事都看不见。
 4. **安全洞是真的。** `cmd.ts` 的白名单拦截字符表漏了 `>` 和 `<`，
@@ -290,12 +298,12 @@ UI 里重点看三处（这是 P1 新增的可视证据）：
 
 | # | 缺口 | 现状 | 塌法 |
 |---|---|---|---|
-| 1 | **没有 git 仓库** | 根目录无 `.git` | 「你怎么管理版本？」答不上来 |
-| 2 | **没有 CI / lint / 格式化** | 无 `.github`、无 eslint/prettier | 「工程化体现在哪？」只有单测 |
-| 3 | **没有 LICENSE** | 远端 `license: null`，仓库 public | 直接是硬伤 |
+| 1 | ~~没有 git 仓库~~ **已修**（2026-10-16） | 独立 `.git`，接回原 7 次提交；两次提交已推 `beiheng127/loom-agent` | — |
+| 2 | **CI 有了，lint 还没有** | `.github/workflows/ci.yml` 跑 typecheck + 158 条单测；仍是**无 eslint/prettier**（仓库没配 lint 配置，构建靠 `next build` 顺带检查） | 「格式化怎么保证？」答不上来 |
+| 3 | ~~没有 LICENSE~~ **已修**（2026-10-16） | MIT，随首次推送一起上 | 直接是硬伤 |
 | 4 | ~~todo 状态不持久化~~ **已修**（2026-10-16） | 事件追加 `data/loom-store/todos/*.jsonl`，跨进程回放已验证 | 独立 todo 日志文件 ≠ DSH 的单一日志，形态差异已在层5 记 |
-| 5 | **远端停在 9-09** | 10 月改造零推送 | 「代码呢？」 |
-| 6 | ~~Plan 无 retry~~ 已补（依赖分批 + 重试 + 上游下沉 + 模型拆步）；**仍无择优 / 无失败重规划** | `runPlanScheduler` + `topoBatches`；`planner.ts` 一次 `generateText` 出清单，模型不给就回落预设 | 「编排器」这个词现在只欠「长歪了能改」（Replanner）与「多拆几次挑好的」 |
+| 5 | ~~远端停在 9-09~~ **已修**（2026-10-16） | 10 月改造已推送两次 | 「代码呢？」 |
+| 6 | ~~择优 / 失败重规划 / 并发上限~~ **已补**（2026-10-16 夜） | `bestOf` + `judge` + `replan` + `maxConcurrency`；真模型端到端验过并修掉「新步沿用失败步模型」的 bug | 「编排器」现在只欠**裁判缓存**（同一批候选只判一次）与**重规划成本预算**（限次数/限 token） |
 | 7 | ~~`zod` 列了依赖但零 import~~ **已删**（2026-10-16） | `packages/core/package.json` 不再声明；`ai` 的 peer 仍会把它装进 `node_modules` | 追问「参数校验呢」时直说：工具 schema 是 JSON Schema 字面量，没有二次校验 |
 | 8 | `toolNameOf` 已修但同类回查仍脆 | 靠 `tool-input-start` 建 id→name 表 | 边界场景可能拿到空名 |
 | 9 | `CHARS_PER_TOKEN = 4` 对 CJK 严重低估 | 沿用 DSH 启发式 | DSH 自己都在 README 里承认这点 |
@@ -381,14 +389,20 @@ UI 里重点看三处（这是 P1 新增的可视证据）：
 
 按性价比排：
 
-1. **`git init` + 首次提交 + 建 LICENSE + 推远端**（0 代码，收益最大）
-2. **加 GitHub Actions：`typecheck` + `test` 两条**（30 行 YAML）
+1. ~~**`git init` + LICENSE + 推远端**~~ **已做**（2026-10-16）：独立 `.git` 接回原 7 次提交，
+   MIT LICENSE + `.gitattributes`（钉 LF），两次提交已推 `beiheng127/loom-agent`
+2. ~~**加 GitHub Actions：`typecheck` + `test`**~~ **已做**（2026-10-16）：`.github/workflows/ci.yml`，
+   `npm ci` + typecheck + `node --test`（158 条）
+   **还欠 lint**：仓库没有 eslint/prettier 配置，这轮没动它——要加就得先定规则，否则一堆存量报错
+   「修复」起来是把代码改乱，不是加门禁
 3. ~~**todo 状态落盘**~~ **已做**（2026-10-16）：`packages/core/src/plan/todo-file.ts` 把事件追加进
    `data/loom-store/todos/<会话>.jsonl`（懒加载、只追加、写失败降级内存），`todo-dir.ts` 负责路径解析
    （`LOOM_TODO_DIR` > 仓库根 > cwd）；11 条单测 + `scripts/probes/todo-persist.mjs write|replay` 两进程实测
-4. ~~**Plan Worker retry**~~ **已做**（依赖分批 + 重试 + 上游摘要下沉 + `chain` 预设，128 条单测锁住）；
-   ~~**Planner LLM 动态拆步**~~ **也做了**（`planner.ts` 一次调用出带依赖的清单，解析不了回落预设，
-   `scripts/probes/planner-live.mjs` 用真模型端到端验过）；剩下的是 **best-of-N 择优 + 失败重规划 + 同批并发上限**
+4. ~~**编排三件套**~~ **已做**（2026-10-16 夜）：并发上限 `maxConcurrency`（默认 2，`<=0` 不限）、
+   best-of-N 择优（`bestOf > 1` 跑 N 份候选交 `judge` 挑，没接裁判就写「未接裁判」）、
+   失败重规划（`replan` 回调重排**剩下没跑的**步，就地改图）；158 条单测 + `replan-live.mjs` 真模型端到端。
+   **下一层是成本**：裁判缓存（同一批候选只判一次）与重规划预算（限次数 / 限 token）——
+   现在 N 份候选 + 1 次裁判的 token 是实打实多花的，没人替你算这笔账
 5. ~~**`zod` 用起来或删掉**~~ **已删**（core 零 import，`ai` 的 peer 仍会装上它）
 6. ~~**后台 job 通道**~~ **已做**（2026-10-16）：`run_safe_cmd` 传 `background:true`（批准后）立刻拿 `jobId`，
    `job_list` / `job_output` / `job_kill` 让模型边跑边读（输出按游标只给新增）；单例必须挂 `globalThis`——
@@ -400,4 +414,7 @@ UI 里重点看三处（这是 P1 新增的可视证据）：
 
 改动前的原始文件在 `docs/_snapshot/` 下（按时间戳分目录），
 `packages/core/dist` 的基线也留了一份用于逐场景比对事件流。
-**没有 git 兜底**，所以这些快照就是唯一的后悔药——P2 第一件事应该就是把它变成 git。
+**git 已经建好了**（2026-10-16），所以现在回滚有两条路：优先 `git log` / `git checkout`，
+快照目录退居二线——它现在只是「P0 改造前长什么样」的史料，不再是唯一的后悔药。
+（`docs/_snapshot/mojibake-20261015/` 那份尤其该留着：它记录了一次 PowerShell 编码自伤，
+以及怎么从会话日志里把原文一个字节不差地捞回来。）

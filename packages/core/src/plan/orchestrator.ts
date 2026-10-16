@@ -22,6 +22,11 @@ export type PlanWorkerDef = {
    * 不填 = 第一批并行跑；填了 = 等上游跑完再跑，且上游结论摘要会拼进本步的 goal。
    */
   dependsOn?: number[];
+  /**
+   * best-of-N：同一个目标并行跑 N 个候选，再由 `judge` 挑一个。默认 1（不择优）。
+   * 注意这是**烧 N 倍 token 换质量**的开关，不是默认值。
+   */
+  bestOf?: number;
 };
 
 export type RunPlanInput = {
@@ -39,6 +44,20 @@ export type RunPlanInput = {
   retryDelayMs?: number;
   /** 默认 true：把直接上游的结论摘要拼进下游 goal（真编排的「数据流」） */
   passUpstreamResults?: boolean;
+  /**
+   * **同批最多同时跑几个**（默认 0 = 不限）。
+   * 一批 8 个候选全开会把 API 打爆 / 触发限流，这个闸门就是给"并发"设上限的。
+   */
+  maxConcurrency?: number;
+  /**
+   * **失败重规划**：某个 Worker 重试也失败时，请 LLM 重新拆剩下没跑的步（默认 false）。
+   * 会烧 token，所以要显式打开。传 `replan` 回调就自动打开。
+   */
+  replan?: PlanReplanner;
+  /** 最多重规划几次（默认 1；到顶就不再问，剩下的照旧跳过） */
+  maxReplans?: number;
+  /** best-of-N 的裁判；不传 = 用了 bestOf 也退回第 1 个候选 */
+  judge?: PlanJudge;
   signal?: AbortSignal;
   onStep?: (step: PlanStep) => void;
 };
@@ -47,6 +66,30 @@ export type RunPlanInput = {
 export type PlanBatchIndex = number[];
 
 export type PlanBatch = { index: number; stepIds: string[] };
+
+/**
+ * 失败重规划：某步重试也失败时，让它重新给出**剩下没跑的步骤**。
+ *
+ * 为什么回调而不是内置：内置就要在 core 里硬编码一个模型调用 + prompt，
+ * 测试和离线场景都会被拖下水。回调让你想接 LLM 就接，想用假数据测编排也行。
+ *
+ * 返回的 Worker 只替换**未开始**的那些步（已 done / failed 的原地保留），
+ * 返回的依赖下标按新数组算。返回 null = 放弃重规划，剩下步照旧跳过。
+ */
+export type PlanReplanner = (input: {
+  goal: string;
+  /** 失败的那一步 */
+  failed: PlanWorkerDef;
+  failedIndex: number;
+  error: string;
+  /** 当前整份 Worker 列表（含已跑完的） */
+  workers: PlanWorkerDef[];
+  /**
+   * 只重排这些下标（还没开始跑的），返回的新数组按这个顺序补齐。
+   * 数量对不上 → 整个重规划作废（宁可照旧跳过，也别跑一份乱的）。
+   */
+  remaining: number[];
+}) => Promise<PlanWorkerDef[] | null>;
 
 /** 依赖写歪了（成环 / 越界 / 依赖自己）时抛这个，信息里点名是哪几个 Worker */
 export class PlanDependencyError extends Error {
@@ -99,11 +142,18 @@ function normalizeAllDeps(workers: PlanWorkerDef[]): number[][] {
 const label = (workers: PlanWorkerDef[], i: number) =>
   `W${i + 1}「${workers[i]?.title ?? ""}」`;
 
-/** 按依赖分层：同层并行、层间串行。成环直接抛 PlanDependencyError */
-export function topoBatches(workers: PlanWorkerDef[]): PlanBatchIndex[] {
-  const deps = normalizeAllDeps(workers);
+/**
+ * 分层核心：同层并行、层间串行。成环直接抛 PlanDependencyError。
+ *
+ * 单独拎出来是因为重规划会改图——改完要拿**已洗好的依赖**重算剩余层级，
+ * 再走一遍 `normalizeAllDeps` 的报错路径就绕远了。
+ */
+function topoLayers(
+  deps: number[][],
+  workers: PlanWorkerDef[],
+): PlanBatchIndex[] {
   const remaining = new Set(deps.map((_, i) => i));
-  const batches: PlanBatchIndex[] = [];
+  const out: PlanBatchIndex[] = [];
   while (remaining.size > 0) {
     const layer = [...remaining].filter((i) =>
       deps[i]!.every((d) => !remaining.has(d)),
@@ -112,10 +162,15 @@ export function topoBatches(workers: PlanWorkerDef[]): PlanBatchIndex[] {
       const stuck = [...remaining].map((i) => label(workers, i)).join(" → ");
       throw new PlanDependencyError(`Plan 依赖成环，绕不出来：${stuck}`);
     }
-    batches.push(layer.sort((a, b) => a - b));
+    out.push(layer.sort((a, b) => a - b));
     for (const i of layer) remaining.delete(i);
   }
-  return batches;
+  return out;
+}
+
+/** 按依赖分层：同层并行、层间串行。成环直接抛 PlanDependencyError */
+export function topoBatches(workers: PlanWorkerDef[]): PlanBatchIndex[] {
+  return topoLayers(normalizeAllDeps(workers), workers);
 }
 
 export type PlanStepRunner = (input: {
@@ -127,6 +182,19 @@ export type PlanStepRunner = (input: {
   /** 直接上游的结论摘要（没开或没上游时是空串） */
   upstream: string;
 }) => Promise<string>;
+
+/**
+ * best-of-N 的裁判：从 N 个候选结论里挑一个，返回**所选候选的下标**。
+ * 返回越界值 / 负数 → 退回第 0 个，并在 step.error 里写明。
+ * 回调抛错 → 那一步按"择优失败"处理，退回第 0 个候选（跑出来的东西不扔，只是没挑）。
+ */
+export type PlanJudge = (input: {
+  step: PlanStep;
+  /** 这一步的目标 */
+  goal: string;
+  /** N 个候选结论，与下标一一对应 */
+  candidates: string[];
+}) => Promise<number> | number;
 
 /** 单条上游结论最多带多少字符，全部上游合计最多多少（别把下游 prompt 撑爆） */
 const DIGEST_PER_DEP = 400;
@@ -156,15 +224,58 @@ const sleep = (ms: number) =>
   ms <= 0 ? Promise.resolve() : new Promise((r) => setTimeout(r, ms));
 
 /**
+ * 有上限的并发 map：`limit <= 0` 时退化成 `Promise.all`（不限流），
+ * 否则同一时刻最多 `limit` 个在跑，跑完一个补一个。
+ *
+ * 为什么不用 `Promise.all(items.map(...))` 了事：best-of-N 一下开 8 个候选，
+ * 或者一批 20 个 Worker，全开会把 API 打爆。**并发上限是真编排的一部分**。
+ */
+export async function mapWithConcurrency<T>(
+  items: number[],
+  limit: number,
+  fn: (i: number) => Promise<T>,
+): Promise<void> {
+  if (limit <= 0 || items.length <= limit) {
+    await Promise.all(items.map((i) => fn(i)));
+    return;
+  }
+  const queue = [...items];
+  let active = 0;
+  await new Promise<void>((resolve) => {
+    const kick = () => {
+      while (active < limit && queue.length > 0) {
+        const i = queue.shift()!;
+        active += 1;
+        // 单步失败由调用方记在 step 上（重试 / skipped），这里只保证闸门继续放行
+        fn(i)
+          .catch(() => undefined)
+          .finally(() => {
+            active -= 1;
+            kick();
+            if (active === 0 && queue.length === 0) resolve();
+          });
+      }
+      if (active === 0 && queue.length === 0) resolve();
+    };
+    kick();
+  });
+}
+
+/**
  * Plan 调度器：**这里才是「编排」**，run 回调只负责「怎么跑一步」。
  *
- * 1. 按依赖分批发（同批 `Promise.all` 并行，批间串行）
+ * 1. 按依赖分批：同批并行、批间串行（每批开始时才算下一批，方便重规划改图）
  * 2. 上游失败/跳过/取消 → 下游直接 `skipped`，不浪费 token
  * 3. 失败的步按 maxRetries 重试（attempts 记在 step 上）
  * 4. 开关打开时把上游结论摘要拼进下游的 `upstream`（数据流，不是各跑各的）
- * 5. signal 中断 → 剩余步骤标 cancelled
+ * 5. `bestOf > 1` 的步并行跑 N 个候选再交给 `judge` 挑一个
+ * 6. 重试也失败的步，若给了 `replan`，让它重排剩下没跑的步，然后接着调度
+ * 7. signal 中断 → 剩余步骤标 cancelled
  *
- * 跟执行解耦是为了能拿假 runner 单测编排本身（拓扑/跳过/重试/取消）。
+ * 跟执行解耦是为了能拿假 runner 单测编排本身（拓扑/跳过/重试/取消/择优/重规划）。
+ *
+ * 注意：重规划是**就地改写你传进来的 workers 数组**（下标一一对应），
+ * 这样执行侧按 `workers[index]` 取工具/剧本时能自动看到新的那一步。
  */
 export async function runPlanScheduler(input: {
   plan: Plan;
@@ -173,6 +284,12 @@ export async function runPlanScheduler(input: {
   maxRetries?: number;
   retryDelayMs?: number;
   passUpstreamResults?: boolean;
+  maxConcurrency?: number;
+  replan?: PlanReplanner;
+  /** 最多重规划几次（默认 1；到顶就不再问，剩下的照旧跳过） */
+  maxReplans?: number;
+  /** best-of-N 的裁判；不传 = 用了 bestOf 也退回第 1 个候选 */
+  judge?: PlanJudge;
   onStep?: (step: PlanStep) => void;
   signal?: AbortSignal;
 }): Promise<{ batches: PlanBatch[]; texts: Map<string, string> }> {
@@ -184,42 +301,193 @@ export async function runPlanScheduler(input: {
   }
   const maxRetries = Math.max(0, input.maxRetries ?? 1);
   const retryDelayMs = Math.max(0, input.retryDelayMs ?? 150);
+  const maxConcurrency = Math.max(0, input.maxConcurrency ?? 0);
   const passUpstream = input.passUpstreamResults !== false;
+  const judge = input.judge;
 
-  const deps = normalizeAllDeps(workers);
-  const levels = (() => {
-    // topoBatches 自己会再洗一次依赖；这里复用已洗好的结果，少一次越界报错的重复路径
-    const remaining = new Set(deps.map((_, i) => i));
-    const out: PlanBatchIndex[] = [];
-    while (remaining.size > 0) {
-      const layer = [...remaining].filter((i) =>
-        deps[i]!.every((d) => !remaining.has(d)),
-      );
-      if (layer.length === 0) {
-        throw new PlanDependencyError(
-          `Plan 依赖成环，绕不出来：${[...remaining]
-            .map((i) => label(workers, i))
-            .join(" → ")}`,
-        );
-      }
-      out.push(layer.sort((a, b) => a - b));
-      for (const i of layer) remaining.delete(i);
-    }
-    return out;
-  })();
-
+  /** 重规划要能改 workers 和依赖，所以这两份是「当前真相」，可写 */
+  let activeWorkers: PlanWorkerDef[] = workers;
+  let deps = normalizeAllDeps(workers);
+  /** 重规划过的次数（记在 plan 上给 UI 看，也防无限重规划） */
+  let replans = 0;
+  const maxReplans = Math.max(1, input.maxReplans ?? 1);
+  const levels = topoLayers(deps, activeWorkers);
   const texts = new Map<string, string>();
   const batches: PlanBatch[] = [];
+  let done = new Set<number>();
+  let cursor = 0;
 
-  for (const [batchIndex, level] of levels.entries()) {
+  const runOne = async (i: number): Promise<void> => {
+    const step = plan.steps[i]!;
+    const dependsOn = deps[i]!;
+
+    const broken = dependsOn.filter((d) => {
+      const status = plan.steps[d]!.status;
+      return status === "failed" || status === "skipped" || status === "cancelled";
+    });
+    if (broken.length > 0) {
+      step.status = "skipped";
+      step.error = `上游没成功，跳过不跑：${broken
+        .map((d) => plan.steps[d]!.title)
+        .join("、")}`;
+      step.endedAt = Date.now();
+      onStep?.(step);
+      return;
+    }
+    if (input.signal?.aborted) {
+      step.status = "cancelled";
+      step.error = "已取消";
+      onStep?.(step);
+      return;
+    }
+
+    const upstream = passUpstream ? upstreamDigest(dependsOn, plan, texts) : "";
+    const attemptsMax = maxRetries + 1;
+    const bestOf = Math.max(1, Math.floor(activeWorkers[i]!.bestOf ?? 1));
+    step.candidates = bestOf;
+
+    for (let attempt = 1; attempt <= attemptsMax; attempt += 1) {
+      step.attempts = attempt;
+      step.status = "running";
+      step.startedAt = step.startedAt ?? Date.now();
+      step.error = undefined;
+      onStep?.(step);
+      try {
+        const text =
+          bestOf > 1
+            ? await runBestOfN({ i, step, bestOf, upstream })
+            : await run({ step, index: i, attempt, upstream });
+        texts.set(step.id, text);
+        step.status = "done";
+        step.resultPreview = text.slice(0, 400);
+        step.endedAt = Date.now();
+        onStep?.(step);
+        return;
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        const aborted = input.signal?.aborted === true;
+        if (attempt < attemptsMax && !aborted) {
+          step.error = `第 ${attempt} 次失败，准备重试：${message}`;
+          onStep?.(step);
+          await sleep(retryDelayMs);
+          continue;
+        }
+        step.status = aborted ? "cancelled" : "failed";
+        step.error = message;
+        step.endedAt = Date.now();
+        onStep?.(step);
+        return;
+      }
+    }
+  };
+
+  /** best-of-N：并行跑 N 个候选（也过并发闸门），再由 judge 挑一个 */
+  const runBestOfN = async (args: {
+    i: number;
+    step: PlanStep;
+    bestOf: number;
+    upstream: string;
+  }): Promise<string> => {
+    const { i, step, bestOf, upstream } = args;
+    const slots = Array.from({ length: bestOf }, (_, k) => k);
+    const candidates: string[] = new Array(bestOf).fill("");
+    const errors: string[] = new Array(bestOf).fill("");
+
+    await mapWithConcurrency(slots, maxConcurrency, async (k) => {
+      try {
+        candidates[k] = await run({ step, index: i, attempt: k + 1, upstream });
+      } catch (err) {
+        errors[k] = err instanceof Error ? err.message : String(err);
+      }
+    });
+
+    const ok = candidates
+      .map((c, k) => ({ k, c }))
+      .filter((x) => x.c.length > 0 || errors[x.k] === "");
+    if (ok.length === 0) {
+      throw new Error(
+        `best-of-${bestOf} 全部失败：${errors.map((e, k) => `#${k + 1} ${e}`).join(" | ")}`,
+      );
+    }
+    // 失败的候选留空串会让裁判瞎挑，索性只把跑出来的交给它
+    const pooled = ok.map((x) => x.c);
+    let picked = 0;
+    /** 只有裁判真的挑过才写 selectedCandidate——不然「跑了 N 个」会被读成「择优成功」 */
+    let judged = false;
+    if (judge && pooled.length > 1) {
+      try {
+        const raw = await judge({ step, goal: step.goal, candidates: pooled });
+        judged = true;
+        picked = Number.isInteger(raw) ? raw : 0;
+        if (picked < 0 || picked >= pooled.length) {
+          step.error = `择优给了越界下标 ${picked}（共 ${pooled.length} 个候选），退回第 1 个`;
+          picked = 0;
+        }
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        step.error = `择优失败，退回第 1 个候选：${message}`;
+        picked = 0;
+      }
+    } else if (pooled.length < bestOf) {
+      step.error = `${bestOf} 个候选里只跑出 ${pooled.length} 个（其余失败），用跑出来的第 1 个`;
+    } else if (bestOf > 1 && !judge) {
+      step.error = `跑了 ${bestOf} 个候选但没接裁判（judge），默认取第 1 个`;
+    }
+    if (judged) step.selectedCandidate = picked;
+    return pooled[picked] ?? "";
+  };
+
+  /** 重规划：把「还没开始」的步交给回调重写，并就地改 workers / deps */
+  const tryReplan = async (failedIndex: number): Promise<boolean> => {
+    if (!input.replan || replans >= maxReplans) return false;
+    const remaining = activeWorkers
+      .map((_, i) => i)
+      .filter((i) => !done.has(i) && plan.steps[i]!.status === "pending");
+    if (remaining.length === 0) return false;
+
+    replans += 1;
+    let next: PlanWorkerDef[] | null = null;
+    try {
+      next = await input.replan({
+        goal: plan.goal,
+        failed: activeWorkers[failedIndex]!,
+        failedIndex,
+        error: plan.steps[failedIndex]!.error ?? "未知错误",
+        workers: activeWorkers,
+        remaining,
+      });
+    } catch (err) {
+      next = null;
+      const message = err instanceof Error ? err.message : String(err);
+      plan.steps[failedIndex]!.error = `重规划回调自己炸了：${message}`;
+    }
+    if (!next || next.length !== remaining.length) {
+      // 数量对不上就作废，宁可照旧跳过，也别跑一份和 steps 对不上的编排
+      return false;
+    }
+    for (const [slot, i] of remaining.entries()) {
+      activeWorkers[i] = next[slot]!;
+      const step = plan.steps[i]!;
+      step.title = next[slot]!.title;
+      step.goal = next[slot]!.goal;
+      step.agentId = next[slot]!.agentId;
+      step.modelId = next[slot]!.modelId;
+    }
+    deps = normalizeAllDeps(activeWorkers);
+    return true;
+  };
+
+  while (cursor < levels.length) {
+    const level = levels[cursor]!;
+    cursor += 1;
     batches.push({
-      index: batchIndex,
+      index: batches.length,
       stepIds: level.map((i) => plan.steps[i]!.id),
     });
 
     for (const i of level) {
       const step = plan.steps[i]!;
-      step.batch = batchIndex;
+      step.batch = batches.length - 1;
       step.dependsOnIds = deps[i]!.map((d) => plan.steps[d]!.id);
     }
 
@@ -228,71 +496,40 @@ export async function runPlanScheduler(input: {
         const step = plan.steps[i]!;
         step.status = "cancelled";
         step.error = "已取消（这一批没开始跑）";
+        step.endedAt = Date.now();
         onStep?.(step);
+        done.add(i);
       }
       continue;
     }
 
-    await Promise.all(
-      level.map(async (i) => {
-        const step = plan.steps[i]!;
-        const dependsOn = deps[i]!;
+    await mapWithConcurrency(level, maxConcurrency, runOne);
+    for (const i of level) done.add(i);
 
-        const broken = dependsOn.filter((d) => {
-          const status = plan.steps[d]!.status;
-          return status === "failed" || status === "skipped" || status === "cancelled";
-        });
-        if (broken.length > 0) {
-          step.status = "skipped";
-          step.error = `上游没成功，跳过不跑：${broken
-            .map((d) => plan.steps[d]!.title)
-            .join("、")}`;
-          step.endedAt = Date.now();
-          onStep?.(step);
-          return;
-        }
-        if (input.signal?.aborted) {
-          step.status = "cancelled";
-          step.error = "已取消";
-          onStep?.(step);
-          return;
-        }
+    // 这一批里若有步彻底失败，先问重规划；改了图就重算剩余层级
+    const failed = level.find((i) => plan.steps[i]!.status === "failed");
+    if (failed !== undefined) {
+      const changed = await tryReplan(failed);
+      if (changed) {
+        // 重算层级，但只留没跑过的下标——改图后层级里可能夹着已完成的步，重跑就重复烧 token
+        const rest = topoLayers(deps, activeWorkers)
+          .map((layer) => layer.filter((i) => !done.has(i)))
+          .filter((layer) => layer.length > 0);
+        levels.splice(cursor, levels.length - cursor, ...rest);
+        continue;
+      }
+    }
+  }
 
-        const upstream = passUpstream ? upstreamDigest(dependsOn, plan, texts) : "";
-        const attemptsMax = maxRetries + 1;
-
-        for (let attempt = 1; attempt <= attemptsMax; attempt += 1) {
-          step.attempts = attempt;
-          step.status = "running";
-          step.startedAt = step.startedAt ?? Date.now();
-          step.error = undefined;
-          onStep?.(step);
-          try {
-            const text = await run({ step, index: i, attempt, upstream });
-            texts.set(step.id, text);
-            step.status = "done";
-            step.resultPreview = text.slice(0, 400);
-            step.endedAt = Date.now();
-            onStep?.(step);
-            return;
-          } catch (err) {
-            const message = err instanceof Error ? err.message : String(err);
-            const aborted = input.signal?.aborted === true;
-            if (attempt < attemptsMax && !aborted) {
-              step.error = `第 ${attempt} 次失败，准备重试：${message}`;
-              onStep?.(step);
-              await sleep(retryDelayMs);
-              continue;
-            }
-            step.status = aborted ? "cancelled" : "failed";
-            step.error = message;
-            step.endedAt = Date.now();
-            onStep?.(step);
-            return;
-          }
-        }
-      }),
-    );
+  // 重规划改图后可能漏掉个别步（依赖没连上 / 层级重算尾巴），兜底标跳过别留 pending
+  for (let i = 0; i < plan.steps.length; i += 1) {
+    const step = plan.steps[i]!;
+    if (step.status === "pending" || step.status === "running") {
+      step.status = "skipped";
+      step.error = step.error ?? "编排结束后仍未执行（上游失败或重规划未覆盖到）";
+      step.endedAt = Date.now();
+      onStep?.(step);
+    }
   }
 
   return { batches, texts };
@@ -336,6 +573,10 @@ export async function runParallelPlan(input: RunPlanInput): Promise<{
     maxRetries: input.maxRetries,
     retryDelayMs: input.retryDelayMs,
     passUpstreamResults: input.passUpstreamResults,
+    maxConcurrency: input.maxConcurrency,
+    replan: input.replan,
+    maxReplans: input.maxReplans,
+    judge: input.judge,
     signal: input.signal,
     onStep: input.onStep,
     run: ({ step, index, upstream }) => {
@@ -372,6 +613,14 @@ export async function runParallelPlan(input: RunPlanInput): Promise<{
       const text = texts.get(step.id);
       const head = `## ${step.title} (${step.agentId} / ${step.modelId})`;
       const meta = [`状态：${statusLine(step)}`];
+      if (step.candidates !== undefined && step.candidates > 1) {
+        // 挑不出来的时候也要说清楚，别让人把「跑了 3 个」读成「择优成功」
+        meta.push(
+          step.selectedCandidate === undefined
+            ? `择优：跑了 ${step.candidates} 个候选，没挑（默认取第 1 个）`
+            : `择优：从 ${step.candidates} 个候选里选了第 ${(step.selectedCandidate ?? 0) + 1} 个`,
+        );
+      }
       if (step.error) meta.push(`原因：${step.error}`);
       return `${head}\n${meta.join("\n")}\n\n${text ?? "（未执行）"}`;
     }),

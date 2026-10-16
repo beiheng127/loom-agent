@@ -149,6 +149,10 @@ type PlanStep = {
   dependsOnIds?: string[];
   /** 实际跑了几次（含重试） */
   attempts?: number;
+  /** best-of-N：跑了几个候选（1 = 没开择优） */
+  candidates?: number;
+  /** 裁判选中的候选下标；undefined = 没挑（默认取第 1 个） */
+  selectedCandidate?: number;
 };
 
 type LogLine = { t: number; text: string };
@@ -299,6 +303,13 @@ export function LoomShell() {
   const [planPlanner, setPlanPlanner] = useState(false);
   const [planPlannerModel, setPlanPlannerModel] = useState("");
   const [planPlannerNote, setPlanPlannerNote] = useState("");
+  // 同批并发上限（0 = 不限）。一批 8 个全开会把 API 打爆，这里给个闸门
+  const [planConcurrency, setPlanConcurrency] = useState(0);
+  // 失败重规划：某步重试也挂了，让模型重排剩下没跑的步（要真模型）
+  const [planReplan, setPlanReplan] = useState(false);
+  // best-of-N：每步跑几个候选再让模型挑（1 = 不择优，N 倍 token）
+  const [planBestOf, setPlanBestOf] = useState(1);
+  const [planReplanNote, setPlanReplanNote] = useState("");
   const [workers, setWorkers] = useState<WorkerDraft[]>([
     {
       title: "Worker A",
@@ -1233,6 +1244,7 @@ export function LoomShell() {
     setSteps([]);
     setPlanBatches([]);
     setPlanPlannerNote("");
+    setPlanReplanNote("");
     setMerged("");
     setPendingWrites([]);
     if (opts?.goal) setGoal(opts.goal);
@@ -1252,6 +1264,9 @@ export function LoomShell() {
           maxRetries: planRetries,
           planner: planPlanner || undefined,
           plannerModelId: planPlanner ? planPlannerModel || undefined : undefined,
+          maxConcurrency: planConcurrency,
+          replan: planReplan || undefined,
+          bestOf: planBestOf,
           workers:
             preset === "custom"
               ? workers.map((w) => ({
@@ -1276,6 +1291,15 @@ export function LoomShell() {
         | undefined;
       setPlanPlannerNote(plannerInfo?.summary ?? "");
       if (plannerInfo?.summary) pushLog(`plan 规划 · ${plannerInfo.summary}`);
+      const replanInfo = data.replan as
+        | { enabled: boolean; notes: string[] }
+        | undefined;
+      const replanLine =
+        replanInfo?.enabled === false
+          ? "重规划要真模型，本次没接上（开关已开但无可用模型）"
+          : (replanInfo?.notes ?? []).join("；");
+      setPlanReplanNote(replanLine);
+      if (replanLine) pushLog(`plan 重规划 · ${replanLine}`);
       const writes = (data.pendingWrites ?? []) as Array<{
         path: string;
         content: string;
@@ -2904,6 +2928,61 @@ export function LoomShell() {
                       拆不成（没真模型 / 模型没给可解析清单）就回落预设，历史里写明原因
                     </small>
                   </div>
+                  <div className="field">
+                    <label>同批并发上限</label>
+                    <select
+                      value={planConcurrency}
+                      onChange={(e) => setPlanConcurrency(Number(e.target.value))}
+                    >
+                      <option value={0}>不限（默认）</option>
+                      <option value={1}>1 个（最慢最省）</option>
+                      <option value={2}>2 个</option>
+                      <option value={4}>4 个</option>
+                      <option value={8}>8 个</option>
+                    </select>
+                    <small>一批 Worker / 候选全开会把 API 打爆，这个闸门给它设上限</small>
+                  </div>
+                  <div className="field">
+                    <label>每步跑几个候选（best-of-N）</label>
+                    <select
+                      value={planBestOf}
+                      onChange={(e) => setPlanBestOf(Number(e.target.value))}
+                    >
+                      <option value={1}>1 个（默认，不择优）</option>
+                      <option value={2}>2 个，挑 1 个</option>
+                      <option value={3}>3 个，挑 1 个</option>
+                      <option value={4}>4 个，挑 1 个</option>
+                    </select>
+                    <small>
+                      烧 N 倍 token 换质量；没真模型就只跑第 1 个候选（不会假装择优）
+                    </small>
+                  </div>
+                  <div className="field">
+                    <label>
+                      <input
+                        type="checkbox"
+                        checked={planReplan}
+                        onChange={(e) => setPlanReplan(e.target.checked)}
+                        style={{ marginRight: 6 }}
+                      />
+                      失败重规划（让模型重排剩下没跑的步）
+                    </label>
+                    <small>
+                      某步重试也挂了才触发；只对还没开始的步生效，已经跑的不重来。要真模型。
+                    </small>
+                  </div>
+                  {planPlannerNote ? (
+                    <div className="field">
+                      <label>拆步结果</label>
+                      <small>{planPlannerNote}</small>
+                    </div>
+                  ) : null}
+                  {planReplanNote ? (
+                    <div className="field">
+                      <label>重规划</label>
+                      <small>{planReplanNote}</small>
+                    </div>
+                  ) : null}
                   {planPreset === "custom" ? (
                     <div className="board">
                       {workers.map((w, i) => (
@@ -3010,6 +3089,9 @@ export function LoomShell() {
                   {planPlannerNote ? (
                     <div className="callout">{planPlannerNote}</div>
                   ) : null}
+                  {planReplanNote ? (
+                    <div className="callout">{planReplanNote}</div>
+                  ) : null}
                   <div className="board">
                     {steps.length === 0 ? (
                       <div className="empty">尚未运行。</div>
@@ -3033,6 +3115,13 @@ export function LoomShell() {
                               {s.attempts && s.attempts > 1 ? (
                                 <span className="badge">
                                   重试 {s.attempts - 1} 次
+                                </span>
+                              ) : null}
+                              {s.candidates && s.candidates > 1 ? (
+                                <span className="badge">
+                                  {s.selectedCandidate === undefined
+                                    ? `跑了 ${s.candidates} 个候选·没挑`
+                                    : `择优 ${s.selectedCandidate + 1}/${s.candidates}`}
                                 </span>
                               ) : null}
                             </div>

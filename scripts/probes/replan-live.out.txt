@@ -1,0 +1,24 @@
+HTTP 200
+目标：读 README 并总结这个仓库
+
+--- steps ---
+W1 读文件（故意用没配 Key 的模型） | status=failed | batch=0 | attempts=1
+   error=缺少环境变量 OPENAI_API_KEY（模型 openai-mini）
+   preview=
+W2 写仓库总结 | status=done | batch=1 | attempts=1
+   error=—
+   preview=README 读取成功，内容完整。以下是基于 README 原文的总结：  ## Loom Agent —— 仓库用途与主要特点  **一句话定位**：本地优先的 **Coding Agent Studio**，用「织机式 Plan Board」把多智能体 × 多模型 × 并行线程组织起来，在 IDE 风格工作台里让多
+
+--- replan ---
+{
+  "enabled": true,
+  "notes": []
+}
+
+--- merged 的择优/状态行 ---
+## 读文件（故意用没配 Key 的模型） (reader / openai-mini)
+状态：failed
+原因：缺少环境变量 OPENAI_API_KEY（模型 openai-mini）
+## 写仓库总结 (reader / deepseek-chat)
+状态：done
+## Loom Agent —— 仓库用途与主要特点

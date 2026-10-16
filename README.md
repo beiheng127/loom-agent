@@ -36,7 +36,11 @@
 - 多步任务四阶段推进：**摸清 → 拟定 → 改码 → 核对**，结果回写、逐步确认
 - Plan 与会话全部本地持久化（JSON 存储），历史可查可删
 
-> 边界还说清楚：拆步是**一次** LLM 调用出清单，不是边跑边重规划——某步失败不会回头改计划（没有 Replanner），也没有多跑几次投票择优，同批没有并发上限。所以它能自己长出**一条**链路，长歪了得重跑；「已知的长链路」仍然是最稳的用法。
+- **best-of-N 择优**：Worker 设「候选数 > 1」就并行跑 N 份，再让裁判模型挑一份定稿（`judgeModelId`）；没接裁判时不假装择优，step 上写明「未接裁判」
+- **失败重规划（Replanner）**：重试也失败的步，可以让规划模型重排**剩下没跑的步**（`replan: true`），新步不会沿用失败那一步的模型——那一步刚证明自己跑不通
+- **同批并发上限**：`maxConcurrency`（默认 2，`<=0` 为不限）限制同一批同时跑几个，避免一批 20 个 Worker 或 N 个候选把 API 打爆
+
+> 边界也说清楚：重规划**只重排还没跑的步**，已经 done / failed 的原样保留；它是一次性的（每步最多触发一次），不是边跑边改计划的常驻 planner。择优同样要一次额外的裁判调用——N 份候选 + 1 次裁判，token 是实打实多花的。
 
 ### ✍️ Composer：Ask / Agent 双模式
 - Ask 模式问代码，Agent 模式改代码；`@` 引用工作区文件
@@ -190,4 +194,4 @@ TypeScript · Node.js ≥ 20 · Next.js 15 (App Router, SSE) · React · Electro
 
 ## 下一步
 
-见 [`docs/HARNESS-P1.md`](./docs/HARNESS-P1.md) §6 与 [`docs/PROGRESS.md`](./docs/PROGRESS.md)：`git init` + LICENSE + CI、best-of-N 择优 + 失败重规划（Replanner）、批量重命名预览 + 批准。
+见 [`docs/HARNESS-P1.md`](./docs/HARNESS-P1.md) §6 与 [`docs/PROGRESS.md`](./docs/PROGRESS.md)：择优的**裁判缓存**（同一批候选只判一次）、重规划的**成本预算**（限制重排次数与 token）、批量重命名预览 + 批准、CI 里跑 lint。

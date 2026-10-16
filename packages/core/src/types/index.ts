@@ -161,6 +161,14 @@ export type PlanStep = {
   batch?: number;
   /** 实际跑了几次（含重试）；1 表示一次过 */
   attempts?: number;
+  /**
+   * best-of-N：这一步实际并行跑了几个候选（1 = 没开择优；没跑就 undefined）。
+   * 只有 `judge` 真的挑了才有意义——挑不出（没传 judge / 裁判报错）就退回第 1 个，
+   * `selectedCandidate` 会是 0，但 `candidates` 仍是 N，别把它读成「择优成功」。
+   */
+  candidates?: number;
+  /** 裁判选中的候选下标（0 基）；-1 = 这一步没开或还没择优 */
+  selectedCandidate?: number;
 };
 
 export type Plan = {

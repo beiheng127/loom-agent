@@ -179,19 +179,27 @@ export {
   runParallelPlan,
   runPlanScheduler,
   topoBatches,
+  mapWithConcurrency,
 } from "./plan/orchestrator.js";
 export type {
   PlanBatch,
   PlanBatchIndex,
+  PlanJudge,
+  PlanReplanner,
   PlanStepRunner,
   PlanWorkerDef,
   RunPlanInput,
 } from "./plan/orchestrator.js";
 export {
+  buildJudgePrompt,
   buildPlannerPrompt,
+  buildReplanPrompt,
   describePlannerResult,
   extractDrafts,
   extractJsonBlock,
+  extractJudgeIndex,
+  makePlannerJudge,
+  makePlannerReplanner,
   normalizePlannerDrafts,
   PlanPlannerError,
   planWorkers,

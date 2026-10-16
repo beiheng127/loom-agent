@@ -255,6 +255,355 @@ test("调度器：step 上带着批次号和上游 step id（给 UI 看的）", 
   assert.deepEqual(plan.steps[1].dependsOnIds, ["s0"]);
 });
 
+// ---------------------------------------------------------------- 并发闸门
+
+test("并发闸门：maxConcurrency=0 表示不限（同批全部同时开跑）", async () => {
+  const workers = [W("A"), W("B"), W("C"), W("D")];
+  let live = 0;
+  let peak = 0;
+  await runPlanScheduler({
+    plan: planFor(workers),
+    workers,
+    retryDelayMs: 0,
+    maxConcurrency: 0,
+    run: async () => {
+      live += 1;
+      peak = Math.max(peak, live);
+      await new Promise((r) => setTimeout(r, 25));
+      live -= 1;
+      return "ok";
+    },
+  });
+  assert.equal(peak, 4);
+});
+
+test("并发闸门：maxConcurrency=2 → 同批峰值不超过 2，且全都跑完", async () => {
+  const workers = [W("A"), W("B"), W("C"), W("D"), W("E")];
+  const plan = planFor(workers);
+  let live = 0;
+  let peak = 0;
+  await runPlanScheduler({
+    plan,
+    workers,
+    retryDelayMs: 0,
+    maxConcurrency: 2,
+    run: async () => {
+      live += 1;
+      peak = Math.max(peak, live);
+      await new Promise((r) => setTimeout(r, 20));
+      live -= 1;
+      return "ok";
+    },
+  });
+  assert.equal(peak, 2);
+  assert.ok(plan.steps.every((s) => s.status === "done"));
+});
+
+test("并发闸门：某一步失败不会把整批卡死（闸门继续放行）", async () => {
+  const workers = [W("A"), W("B"), W("C")];
+  const plan = planFor(workers);
+  await runPlanScheduler({
+    plan,
+    workers,
+    maxRetries: 0,
+    retryDelayMs: 0,
+    maxConcurrency: 1,
+    run: async ({ step }) => {
+      if (step.title === "B") throw new Error("B 炸了");
+      return "ok";
+    },
+  });
+  assert.equal(plan.steps[0].status, "done");
+  assert.equal(plan.steps[1].status, "failed");
+  assert.equal(plan.steps[2].status, "done");
+});
+
+// ---------------------------------------------------------------- best-of-N
+
+test("best-of-N：跑满 N 个候选，judge 挑中的那个成为最终结论", async () => {
+  const workers = [{ ...W("A"), bestOf: 3 }];
+  const plan = planFor(workers);
+  const calls = [];
+  const { texts } = await runPlanScheduler({
+    plan,
+    workers,
+    retryDelayMs: 0,
+    judge: ({ candidates }) => {
+      // 专挑最长的那个，验证「结论真的来自被选中的候选」
+      return candidates.reduce(
+        (best, c, k) => (c.length > candidates[best].length ? k : best),
+        0,
+      );
+    },
+    run: async ({ attempt }) => {
+      calls.push(attempt);
+      return "候选".repeat(attempt); // 第 1 个最短，第 3 个最长
+    },
+  });
+  assert.deepEqual(calls, [1, 2, 3]);
+  assert.equal(plan.steps[0].status, "done");
+  assert.equal(plan.steps[0].candidates, 3);
+  assert.equal(plan.steps[0].selectedCandidate, 2);
+  assert.equal(texts.get("s0"), "候选".repeat(3));
+});
+
+test("best-of-N：没传 judge → 退回第 1 个候选并在 error 里说清楚", async () => {
+  const workers = [{ ...W("A"), bestOf: 2 }];
+  const plan = planFor(workers);
+  const { texts } = await runPlanScheduler({
+    plan,
+    workers,
+    retryDelayMs: 0,
+    run: async ({ attempt }) => `候选${attempt}`,
+  });
+  assert.equal(texts.get("s0"), "候选1");
+  // 没裁判就不写 selectedCandidate：别让「跑了 2 个」被读成「择优成功」
+  assert.equal(plan.steps[0].selectedCandidate, undefined);
+  assert.match(plan.steps[0].error, /没接裁判/);
+});
+
+test("best-of-N：judge 越界 / 抛错 → 都退回第 1 个候选且写明原因", async () => {
+  const mk = async (judge) => {
+    const workers = [{ ...W("A"), bestOf: 3 }];
+    const plan = planFor(workers);
+    const { texts } = await runPlanScheduler({
+      plan,
+      workers,
+      retryDelayMs: 0,
+      judge,
+      run: async ({ attempt }) => `候选${attempt}`,
+    });
+    return { text: texts.get("s0"), step: plan.steps[0] };
+  };
+
+  const bad = await mk(() => 99);
+  assert.equal(bad.text, "候选1");
+  assert.match(bad.step.error, /越界下标 99/);
+
+  const boom = await mk(() => {
+    throw new Error("裁判自己炸了");
+  });
+  assert.equal(boom.text, "候选1");
+  assert.match(boom.step.error, /择优失败/);
+});
+
+test("best-of-N：候选全失败 → 整步 failed（不许拿空串当结论）", async () => {
+  const workers = [{ ...W("A"), bestOf: 2 }];
+  const plan = planFor(workers);
+  await runPlanScheduler({
+    plan,
+    workers,
+    retryDelayMs: 0,
+    judge: () => 0,
+    run: async () => {
+      throw new Error("模型 500");
+    },
+  });
+  assert.equal(plan.steps[0].status, "failed");
+  assert.match(plan.steps[0].error, /模型 500/);
+});
+
+test("best-of-N：部分候选失败 → 用跑出来的那个，error 说明少了几份", async () => {
+  const workers = [{ ...W("A"), bestOf: 3 }];
+  const plan = planFor(workers);
+  const { texts } = await runPlanScheduler({
+    plan,
+    workers,
+    retryDelayMs: 0,
+    run: async ({ attempt }) => {
+      if (attempt === 1) throw new Error("限流");
+      return `候选${attempt}`;
+    },
+  });
+  assert.equal(plan.steps[0].status, "done");
+  assert.equal(texts.get("s0"), "候选2");
+  assert.match(plan.steps[0].error, /只跑出 2 个/);
+});
+
+test("best-of-N：bestOf=1 → 行为与不开完全一致（默认值不烧钱）", async () => {
+  const workers = [{ ...W("A"), bestOf: 1 }];
+  const plan = planFor(workers);
+  let calls = 0;
+  await runPlanScheduler({
+    plan,
+    workers,
+    retryDelayMs: 0,
+    judge: () => 0,
+    run: async () => {
+      calls += 1;
+      return "ok";
+    },
+  });
+  assert.equal(calls, 1);
+  assert.equal(plan.steps[0].candidates, 1);
+  assert.equal(plan.steps[0].selectedCandidate, undefined);
+});
+
+// ---------------------------------------------------------------- 失败重规划
+
+/**
+ * 注意：重规划只管**还没开始**的步。同批的步早就一起开跑了，改不动——
+ * 所以下面这些用例都得用**链式依赖**（A → B → C），让 B/C 真的还在 pending。
+ * 这不是实现偷懒：已经烧掉的 token 收不回来，重排只在"还没跑"的地方才有意义。
+ */
+test("重规划：上游彻底失败 → 还没跑的步被换掉并接着跑完", async () => {
+  const workers = [W("A"), W("B", [0]), W("C", [1])];
+  const plan = planFor(workers);
+  const ran = [];
+  await runPlanScheduler({
+    plan,
+    workers,
+    maxRetries: 0,
+    retryDelayMs: 0,
+    replan: async ({ failed, failedIndex, remaining }) => {
+      assert.equal(failedIndex, 0);
+      assert.match(failed.title, /A/);
+      assert.deepEqual(remaining, [1, 2]);
+      // 关键：重排时把对失败步的依赖摘掉，剩下的才跑得下去
+      return [W("B′"), { ...W("C′"), dependsOn: [1] }];
+    },
+    run: async ({ step }) => {
+      ran.push(step.title);
+      if (step.title === "A") throw new Error("A 真的不行");
+      return `${step.title} 成了`;
+    },
+  });
+
+  assert.deepEqual(ran, ["A", "B′", "C′"]);
+  assert.equal(plan.steps[0].status, "failed");
+  assert.equal(plan.steps[1].status, "done");
+  assert.equal(plan.steps[2].status, "done");
+  // 步的标题/目标被就地改写了（UI 看的是 step，不是 workers）
+  assert.equal(plan.steps[1].title, "B′");
+  assert.equal(plan.steps[2].title, "C′");
+});
+
+test("重规划：新步仍依赖失败步 → 照旧 skipped（重规划不豁免上游失败）", async () => {
+  const workers = [W("A"), W("B", [0])];
+  const plan = planFor(workers);
+  const ran = [];
+  await runPlanScheduler({
+    plan,
+    workers,
+    maxRetries: 0,
+    retryDelayMs: 0,
+    replan: async () => [{ ...W("B′"), dependsOn: [0] }],
+    run: async ({ step }) => {
+      ran.push(step.title);
+      if (step.title === "A") throw new Error("A 挂了");
+      return "ok";
+    },
+  });
+  assert.deepEqual(ran, ["A"]);
+  assert.equal(plan.steps[1].title, "B′");
+  assert.equal(plan.steps[1].status, "skipped");
+  assert.match(plan.steps[1].error, /上游没成功/);
+});
+
+test("重规划：同批的步已经在跑了 → 改不动，重规划不该被调用", async () => {
+  const workers = [W("A"), W("B")];
+  const plan = planFor(workers);
+  let asked = 0;
+  await runPlanScheduler({
+    plan,
+    workers,
+    maxRetries: 0,
+    retryDelayMs: 0,
+    replan: async () => {
+      asked += 1;
+      return [];
+    },
+    run: async ({ step }) => {
+      if (step.title === "A") throw new Error("A 挂了");
+      return "ok";
+    },
+  });
+  assert.equal(asked, 0); // 没有「还没开始」的步可重排
+  assert.equal(plan.steps[1].status, "done"); // B 照原样跑完了
+});
+
+test("重规划：返回数量对不上 → 作废，剩下的照旧跳过", async () => {
+  const workers = [W("A"), W("B", [0])];
+  const plan = planFor(workers);
+  await runPlanScheduler({
+    plan,
+    workers,
+    maxRetries: 0,
+    retryDelayMs: 0,
+    replan: async () => [W("X"), W("Y"), W("Z")], // 要 1 个给了 3 个
+    run: async ({ step }) => {
+      if (step.title === "A") throw new Error("A 挂了");
+      return "ok";
+    },
+  });
+  assert.equal(plan.steps[1].title, "B"); // 没被改写
+  assert.equal(plan.steps[1].status, "skipped");
+});
+
+test("重规划：回调自己抛错 → 记在失败步上，不连累别的步", async () => {
+  const workers = [W("A"), W("B", [0])];
+  const plan = planFor(workers);
+  await runPlanScheduler({
+    plan,
+    workers,
+    maxRetries: 0,
+    retryDelayMs: 0,
+    replan: async () => {
+      throw new Error("replan 服务 500");
+    },
+    run: async () => {
+      throw new Error("A 挂了");
+    },
+  });
+  assert.equal(plan.steps[0].status, "failed");
+  assert.match(plan.steps[0].error, /重规划回调自己炸了/);
+});
+
+test("重规划：maxReplans 到顶就不再问（默认 1 次）", async () => {
+  const workers = [W("A"), W("B", [0]), W("C", [1])];
+  const plan = planFor(workers);
+  let asked = 0;
+  await runPlanScheduler({
+    plan,
+    workers,
+    maxRetries: 0,
+    retryDelayMs: 0,
+    replan: async () => {
+      asked += 1;
+      return [W(`B${asked}`), { ...W(`C${asked}`), dependsOn: [1] }];
+    },
+    run: async ({ step }) => {
+      if (step.title === "A") throw new Error("A 挂了");
+      if (step.title.startsWith("B")) throw new Error("换汤不换药");
+      return "ok";
+    },
+  });
+  assert.equal(asked, 1); // B1 再失败也不问第二次
+  assert.equal(plan.steps[1].status, "failed");
+  // C1 依赖 B1（failed）→ 跳过，不留 pending
+  assert.equal(plan.steps[2].status, "skipped");
+});
+
+test("重规划：结束后不允许留 pending/running 的步", async () => {
+  const workers = [W("A"), W("B", [0])];
+  const plan = planFor(workers);
+  await runPlanScheduler({
+    plan,
+    workers,
+    maxRetries: 0,
+    retryDelayMs: 0,
+    replan: async () => null, // 明确放弃
+    run: async ({ step }) => {
+      if (step.title === "A") throw new Error("A 挂了");
+      return "ok";
+    },
+  });
+  assert.ok(
+    plan.steps.every((s) => s.status !== "pending" && s.status !== "running"),
+    `仍有待跑的步：${JSON.stringify(plan.steps.map((s) => s.status))}`,
+  );
+});
+
 // ---------------------------------------------------------------- 端到端
 
 test("runParallelPlan：链式预设跑通，批次 1→1→1，merged 带状态行", async () => {
@@ -283,6 +632,49 @@ test("runParallelPlan：链式预设跑通，批次 1→1→1，merged 带状态
     assert.match(merged, /## C1 · 结构/);
     // C3 是 editor + write_file 剧本，必然产生一个待审批写入
     assert.ok(plan.steps[2].resultPreview.length > 0);
+  } finally {
+    await fsp.rm(workspaceRoot, { recursive: true, force: true });
+    await fsp.rm(skillsRoot, { recursive: true, force: true });
+  }
+});
+
+test("runParallelPlan：bestOf=2 + judge → merged 里写明挑了第几个候选", async () => {
+  const workspaceRoot = await fsp.mkdtemp(path.join(os.tmpdir(), "loom-plan-"));
+  const skillsRoot = await fsp.mkdtemp(path.join(os.tmpdir(), "loom-skills-"));
+  const workers = defaultDemoWorkers("验证择优").map((w) => ({ ...w, bestOf: 2 }));
+  try {
+    const { plan, merged } = await runParallelPlan({
+      workspaceRoot,
+      goal: "验证择优",
+      skillsRoot,
+      workers,
+      maxRetries: 0,
+      judge: () => 1, // 专挑第 2 个候选，验证文案跟着走
+    });
+    assert.equal(plan.steps[0].candidates, 2);
+    assert.equal(plan.steps[0].selectedCandidate, 1);
+    assert.match(merged, /择优：从 2 个候选里选了第 2 个/);
+  } finally {
+    await fsp.rm(workspaceRoot, { recursive: true, force: true });
+    await fsp.rm(skillsRoot, { recursive: true, force: true });
+  }
+});
+
+test("runParallelPlan：bestOf=2 但没 judge → merged 写明「跑了 2 个候选，没挑」", async () => {
+  const workspaceRoot = await fsp.mkdtemp(path.join(os.tmpdir(), "loom-plan-"));
+  const skillsRoot = await fsp.mkdtemp(path.join(os.tmpdir(), "loom-skills-"));
+  const workers = defaultDemoWorkers("验证择优").map((w) => ({ ...w, bestOf: 2 }));
+  try {
+    const { plan, merged } = await runParallelPlan({
+      workspaceRoot,
+      goal: "验证择优",
+      skillsRoot,
+      workers,
+      maxRetries: 0,
+    });
+    assert.equal(plan.steps[0].candidates, 2);
+    assert.equal(plan.steps[0].selectedCandidate, undefined);
+    assert.match(merged, /跑了 2 个候选，没挑/);
   } finally {
     await fsp.rm(workspaceRoot, { recursive: true, force: true });
     await fsp.rm(skillsRoot, { recursive: true, force: true });

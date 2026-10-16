@@ -19,6 +19,8 @@ import {
   PlanDependencyError,
   topoBatches,
   type PlanBatchIndex,
+  type PlanJudge,
+  type PlanReplanner,
   type PlanWorkerDef,
 } from "./orchestrator.js";
 
@@ -30,6 +32,12 @@ export const PLANNER_DEFAULTS = {
   /** 模型输出超过这个字符数就不费劲解析了 */
   maxOutputChars: 16000,
 } as const;
+
+/**
+ * 重规划给的新步，没写 modelId 时兜底用这个。
+ * 刻意不沿用失败步的模型——那一步刚刚证明自己跑不通，沿用等于再撞一次同一堵墙。
+ */
+const PLANNER_FALLBACK_MODEL = "mock-local";
 
 /** 规划失败（形状不对 / 依赖不合法 / 模型没吐 JSON）——调用方据此回落预设 */
 export class PlanPlannerError extends Error {
@@ -318,4 +326,217 @@ export function describePlannerResult(result: PlanPlannerResult): string {
   const shape = result.batches.map((b) => b.length).join(" → ");
   const notes = result.notes.length ? `；附注 ${result.notes.length} 条` : "";
   return `模型拆出 ${result.workers.length} 个 Worker，批次 ${shape}（${result.elapsedMs}ms）${notes}`;
+}
+
+/** 失败重规划的请求体：让模型看着「原目标 + 哪步挂了 + 已完成的结论」重排剩下的 */
+export function buildReplanPrompt(input: {
+  goal: string;
+  failedTitle: string;
+  failedGoal: string;
+  error: string;
+  doneTitles: string[];
+  remainingTitles: string[];
+}): { system: string; prompt: string } {
+  const done = input.doneTitles.length
+    ? input.doneTitles.map((t) => `- ${t}`).join("\n")
+    : "-（还没有完成的步骤）";
+  const remaining = input.remainingTitles.map((t) => `- ${t}`).join("\n");
+  const system = [
+    "你是一个任务编排器。一次执行里某一步失败了，你要把**剩下没跑的步骤**重新拆一遍，绕开这个失败。",
+    "",
+    "严格只输出一个 JSON 对象（不要解释、不要 Markdown 围栏），形状：",
+    '{"workers":[{"title":"短标题","goal":"这一步要干什么","agentId":"reader","dependsOn":[]}]}',
+    "",
+    "规则：",
+    `- 必须正好 ${input.remainingTitles.length} 条 Worker（替换下面列出的这些步骤，一条对一个）`,
+    "- dependsOn 是**下标数组**（0 基），指向**这份新清单内部**的其它 Worker；不许指向已完成的步骤",
+    "- 不许依赖失败的那一步（它已经挂了），要换成别的路径完成同一个总目标",
+    "- 不许成环，不许依赖自己",
+    "- goal 要写成能直接交给一个 Agent 执行的一句话",
+  ].join("\n");
+  const prompt = [
+    `总目标：${input.goal}`,
+    "",
+    `失败的步骤：${input.failedTitle}（要做的是：${input.failedGoal}）`,
+    `失败原因：${input.error}`,
+    "",
+    `已经完成的步骤：\n${done}`,
+    "",
+    `需要你重排的 ${input.remainingTitles.length} 个步骤（按这个顺序给出）：\n${remaining}`,
+    "",
+    "请只输出 JSON 清单。",
+  ].join("\n");
+  return { system, prompt };
+}
+
+/** best-of-N 的裁判提示词：给 N 份候选，让模型只回一个下标 */
+export function buildJudgePrompt(input: {
+  goal: string;
+  candidates: string[];
+}): { system: string; prompt: string } {
+  const system = [
+    "你是一个评审。下面有若干份针对同一目标的候选结论，你要挑出最好的那份。",
+    "",
+    "严格只输出一个 JSON 对象（不要解释、不要 Markdown 围栏），形状：",
+    '{"index":0}',
+    "",
+    "规则：",
+    `- index 是 0 基下标，必须在 0..${input.candidates.length - 1} 之间`,
+    "- 只看「对目标的完成度、准确性、可执行性」，不要因为某份更长就选它",
+    "- 打不开局面就选第 0 份，别输出别的东西",
+  ].join("\n");
+  const prompt = [
+    `目标：${input.goal}`,
+    "",
+    ...input.candidates.map(
+      (c, k) => `### 候选 ${k}\n${c.slice(0, 4000)}\n`,
+    ),
+    "请只输出 JSON。",
+  ].join("\n");
+  return { system, prompt };
+}
+
+/** 从模型输出里抠出 `{"index":n}`；抠不出来就返回 null（调用方退回第 0 份） */
+export function extractJudgeIndex(text: string, total: number): number | null {
+  const trimmed = text.trim();
+  const bare = trimmed.match(/^\s*(\d+)\s*$/);
+  if (bare) {
+    const n = Number(bare[1]);
+    return n >= 0 && n < total ? n : null;
+  }
+  try {
+    const raw = extractJsonBlock(text) as { index?: unknown };
+    const n = Number(raw?.index);
+    if (!Number.isInteger(n) || n < 0 || n >= total) return null;
+    return n;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 造一个 best-of-N 裁判：让模型从 N 份候选里挑一份。
+ *
+ * 和 replanner 一样是工厂：调度器只认回调。模型不给力（吐不出下标 / 越界 / 报错）
+ * 就抛错——调度器会退回第 0 份候选并把原因写进 `step.error`，**不会**假装择优成功。
+ */
+export function makePlannerJudge(input: {
+  modelId?: string;
+  languageModel?: LanguageModel | null;
+  signal?: AbortSignal;
+}): PlanJudge {
+  return async ({ goal, candidates }) => {
+    if (candidates.length < 2) return 0;
+    let model = input.languageModel ?? null;
+    if (!model && input.modelId) {
+      model = resolveLanguageModel(getModelConfig(input.modelId));
+    }
+    if (!model) return 0;
+
+    const { system, prompt } = buildJudgePrompt({ goal, candidates });
+    const result = await generateText({
+      model,
+      system,
+      prompt,
+      temperature: PLANNER_DEFAULTS.temperature,
+      maxRetries: 1,
+      abortSignal: input.signal,
+    });
+    const picked = extractJudgeIndex(result.text, candidates.length);
+    if (picked === null) {
+      throw new Error(
+        `裁判没给出合法下标（共 ${candidates.length} 个候选）。原文开头：${result.text.trim().slice(0, 80)}`,
+      );
+    }
+    return picked;
+  };
+}
+
+/**
+ * 造一个接在调度器上的 `PlanReplanner`：失败时请模型重排**剩下没跑**的步。
+ *
+ * 为什么是工厂：调度器只认回调（不认模型），要不要烧 token 重规划由调用方决定。
+ * 模型不给力 / 数量对不上 → 返回 null，调度器会照旧把剩下的标 skipped，
+ * **不会**拿一份半截清单去跑。
+ */
+export function makePlannerReplanner(input: {
+  modelId?: string;
+  languageModel?: LanguageModel | null;
+  maxWorkers?: number;
+  allowedAgentIds?: string[];
+  defaultAgentId?: string;
+  defaultModelId?: string;
+  signal?: AbortSignal;
+  onNote?: (note: string) => void;
+}): PlanReplanner {
+  const maxWorkers = input.maxWorkers ?? PLANNER_DEFAULTS.maxWorkers;
+  return async ({ goal, failed, error, workers, remaining }) => {
+    let model = input.languageModel ?? null;
+    if (!model && input.modelId) {
+      model = resolveLanguageModel(getModelConfig(input.modelId));
+    }
+    if (!model) return null;
+
+    const doneTitles = workers
+      .filter((_, i) => !remaining.includes(i))
+      .map((w) => w.title);
+    const { system, prompt } = buildReplanPrompt({
+      goal,
+      failedTitle: failed.title,
+      failedGoal: failed.goal,
+      error,
+      doneTitles,
+      remainingTitles: remaining.map((i) => workers[i]?.title ?? `第 ${i + 1} 步`),
+    });
+
+    let text: string;
+    try {
+      const result = await generateText({
+        model,
+        system,
+        prompt,
+        temperature: PLANNER_DEFAULTS.temperature,
+        maxRetries: 1,
+        abortSignal: input.signal,
+      });
+      text = result.text;
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      input.onNote?.(`重规划时模型调用失败，照旧跳过剩余步骤：${message}`);
+      return null;
+    }
+
+    try {
+      const raw = extractJsonBlock(text);
+      // 关键：默认模型绝不能沿用**失败那一步**的模型——它刚证明自己跑不通。
+      // 用重规划自己这个模型（它刚才成功返回了清单），都没有才退回默认。
+      const fallbackModel =
+        input.defaultModelId ?? input.modelId ?? PLANNER_FALLBACK_MODEL;
+      const { workers: next, notes } = normalizePlannerDrafts(raw, {
+        maxWorkers: Math.max(maxWorkers, remaining.length),
+        allowedAgentIds: input.allowedAgentIds,
+        defaultAgentId: input.defaultAgentId,
+        defaultModelId: fallbackModel,
+      });
+      // 模型若照抄了失败步的模型，就地换掉：不然重排出来的一步会接着撞同一堵墙
+      if (input.defaultModelId === undefined && failed.modelId) {
+        for (const w of next) {
+          if (w.modelId === failed.modelId) w.modelId = fallbackModel;
+        }
+      }
+      for (const note of notes) input.onNote?.(note);
+      // 数量对不上 → 整个作废（调度器会因此保留原步并跳过，绝不错位执行）
+      if (next.length !== remaining.length) {
+        input.onNote?.(
+          `重规划给了 ${next.length} 个 Worker，但需要 ${remaining.length} 个，作废`,
+        );
+        return null;
+      }
+      return next;
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      input.onNote?.(`重规划结果不可用，照旧跳过剩余步骤：${message}`);
+      return null;
+    }
+  };
 }
