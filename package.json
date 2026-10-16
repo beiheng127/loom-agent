@@ -12,6 +12,9 @@
     "apps/web",
     "apps/desktop"
   ],
+  "dependencies": {
+    "ai": "^6.0.230"
+  },
   "scripts": {
     "demo": "npm run demo --workspace=@loom/core",
     "test": "npm test --workspace=@loom/core",

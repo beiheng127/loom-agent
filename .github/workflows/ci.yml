@@ -1,0 +1,40 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        node-version: [22.x]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Use Node.js ${{ matrix.node-version }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck (core + web)
+        run: npm run typecheck
+
+      - name: Build core
+        run: npm run build:core
+
+      - name: Unit tests
+        run: npm test
+
+      - name: Docs encoding check
+        run: node scripts/probes/check-docs-encoding.mjs
+
+      - name: Mock claim audit (no fake actions)
+        run: node scripts/probes/audit-mock-claims.mjs
